@@ -1,6 +1,7 @@
 #include "core/engine.hpp"
 #include "core/selftest.hpp"
 #include "core/platform.hpp"
+#include "core/asset_database.hpp"
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
@@ -47,6 +48,29 @@ int main(int argc, char* argv[]) {
     setenv("MESA_GL_VERSION_OVERRIDE", "4.5", 1);
     setenv("MESA_GLSL_VERSION_OVERRIDE", "450", 1);
 #endif
+
+    // Mints the .meta sidecars for a content tree and exits.
+    //
+    // Handled before the working directory is anchored to the executable, because
+    // this is aimed at a source tree the caller names rather than at whatever sits
+    // beside the binary. GUIDs have to be authored next to the source assets and
+    // committed: if they were only ever minted into a build output, every clean
+    // build would issue new ones and every scene reference would break - which is
+    // the exact failure the sidecars exist to prevent.
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--index-assets") != 0) continue;
+
+        std::vector<std::string> roots;
+        for (int j = i + 1; j < argc; ++j) {
+            if (argv[j][0] == '-') break;
+            roots.push_back(argv[j]);
+        }
+        if (roots.empty()) roots = { "Content", "EngineContent" };
+
+        AssetDatabase::get().scan(roots);
+        std::cout << "Indexed " << AssetDatabase::get().asset_count() << " assets." << std::endl;
+        return 0;
+    }
 
     std::vector<std::string> anchored_args;
     anchor_working_directory_to_executable(argc, argv, anchored_args);
