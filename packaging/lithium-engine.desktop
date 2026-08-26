@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Lithium Engine
+Comment=Real-time 3D game engine with the Sodium PBR renderer
+Exec=Lithium_Engine
+Icon=lithium-engine
+Categories=Development;Graphics;
+Terminal=false

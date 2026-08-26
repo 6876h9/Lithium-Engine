@@ -1,0 +1,32 @@
+# Doxygen configuration for Lithium Engine's API reference.
+# Generate with: doxygen Doxyfile   (run from custom_engine/)
+# Output lands in docs/api/html/index.html
+
+PROJECT_NAME           = "Lithium Engine"
+PROJECT_BRIEF          = "Custom C++ game engine: editor, OpenGL/Vulkan rendering, Jolt physics, native and visual scripting"
+OUTPUT_DIRECTORY       = docs/api
+
+INPUT                  = include src README.md GETTING_STARTED.md
+RECURSIVE              = YES
+FILE_PATTERNS          = *.hpp *.h *.cpp
+EXCLUDE                = thirdparty build build_asan build_debug
+EXCLUDE_PATTERNS       = */thirdparty/* */_deps/* */build*/*
+USE_MDFILE_AS_MAINPAGE = README.md
+
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+
+EXTRACT_ALL             = YES
+EXTRACT_PRIVATE         = NO
+EXTRACT_STATIC          = YES
+RECURSIVE               = YES
+
+SOURCE_BROWSER          = YES
+INLINE_SOURCES          = NO
+
+HAVE_DOT                = NO
+CLASS_DIAGRAMS          = YES
+
+QUIET                   = NO
+WARN_IF_UNDOCUMENTED    = YES
+WARN_LOGFILE            = docs/api/doxygen_warnings.log

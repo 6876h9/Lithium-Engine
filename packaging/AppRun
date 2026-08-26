@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+#
+# AppImage entry point.
+#
+# $APPDIR is set by the AppImage runtime to the mounted read-only image root.
+# Everything below is resolved from it, so nothing depends on where the .AppImage
+# file itself happens to live.
+HERE="${APPDIR:-$(dirname "$(readlink -f "${0}")")}"
+
+# Bundled libraries. Deliberately appended *after* nothing else: the system's own
+# GL/driver libraries must still win, because a bundled libGL cannot talk to the
+# host's kernel driver and would break hardware acceleration.
+export LD_LIBRARY_PATH="$HERE/usr/lib:$HERE/usr/lib/lithium${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+# The engine anchors its own working directory to the executable, but set it here
+# too so relative asset paths behave identically when launched by a desktop file.
+cd "$HERE/usr/bin" || exit 1
+
+exec "$HERE/usr/bin/Lithium_Engine" "$@"

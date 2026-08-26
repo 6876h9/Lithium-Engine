@@ -1,0 +1,87 @@
+// First-Person Controller in C-Minus
+// Use W/A/S/D to walk.
+// Move mouse to look around.
+// Click left mouse button (or press Shift) to lock mouse.
+// Press Escape (scancode 41) to unlock mouse.
+
+if (initialized == 0) {
+    cx = 0.0;
+    cy = 1.8;
+    cz = 5.0;
+    pitch = 0.0;
+    yaw = 0.0;
+    mouse_locked = 0;
+    initialized = 1;
+}
+
+dt = get_dt();
+
+// Click left click or press LShift (scancode 225) to lock mouse
+if (is_key_pressed(225)) {
+    if (mouse_locked == 0) {
+        lock_mouse(1.0);
+        mouse_locked = 1;
+    }
+}
+
+// Press Escape (scancode 41) to unlock mouse
+if (is_key_pressed(41)) {
+    if (mouse_locked == 1) {
+        lock_mouse(0.0);
+        mouse_locked = 0;
+    }
+}
+
+// 1. Mouse look
+if (mouse_locked == 1) {
+    sensitivity = 0.002;
+    dx = get_mouse_dx();
+    dy = get_mouse_dy();
+    
+    yaw = yaw - dx * sensitivity;
+    pitch = pitch - dy * sensitivity;
+    
+    // Clamp pitch between -1.4 and 1.4 radians to prevent flipping
+    if (pitch > 1.4) {
+        pitch = 1.4;
+    }
+    if (pitch < -1.4) {
+        pitch = -1.4;
+    }
+}
+
+// 2. Walk controls (WASD keys)
+speed = 5.0 * dt;
+// forward/right taken from the engine's view matrix: rotationY(t) builds Ry(-t),
+// so forward is (-sin(yaw), 0, -cos(yaw)) and right is (cos(yaw), 0, -sin(yaw)).
+// These previously had one sign wrong each, which mirrors A/D and skews W/S as
+// soon as you turn.
+fx = 0.0 - sin(yaw);
+fz = 0.0 - cos(yaw);
+rx = cos(yaw);
+rz = 0.0 - sin(yaw);
+
+// W = scancode 26
+if (is_key_pressed(26)) {
+    cx = cx + fx * speed;
+    cz = cz + fz * speed;
+}
+// S = scancode 22
+if (is_key_pressed(22)) {
+    cx = cx - fx * speed;
+    cz = cz - fz * speed;
+}
+// A = scancode 4
+if (is_key_pressed(4)) {
+    cx = cx - rx * speed;
+    cz = cz - rz * speed;
+}
+// D = scancode 7
+if (is_key_pressed(7)) {
+    cx = cx + rx * speed;
+    cz = cz + rz * speed;
+}
+
+// 3. Apply position and rotation to the engine camera
+set_cam_pos(cx, cy, cz);
+set_cam_rot(pitch, yaw);

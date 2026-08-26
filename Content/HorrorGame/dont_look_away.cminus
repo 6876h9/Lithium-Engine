@@ -1,0 +1,443 @@
+// =============================================================================
+//  DON'T LOOK AWAY  -  a horror game for the Lithium engine
+//
+//  Attached to the "Stalker" actor by facility.lithium. Run it with:
+//      ./Lithium_Game Content/HorrorGame/facility.lithium
+//
+//  One script runs the whole game, and it has to: a C-Minus script may only move
+//  the actor it is attached to, and the thing that most needs moving is the
+//  stalker. Everything else - you, the camera, the objectives - is state held in
+//  here and pushed out through set_cam_pos / set_cam_rot.
+//
+//  CONTROLS
+//    W A S D     walk                (the mouse is captured on the first frame)
+//    Escape      release the mouse
+//    Left Shift  capture it again
+//
+//  THE RULE
+//    It does not move while you are looking at it.
+//    It is always closer than you left it.
+//
+//  Charge all four beacons, then return to the lamp at the centre.
+//  Four markers along the top track them. The screen edges do the rest.
+// =============================================================================
+
+if (ready == 0) {
+
+    // --- level collision, generated alongside the scene ----------------------
+    // Generated from gen_level.py - must match facility.lithium.
+    wall_count = 16;
+    wx[0] = 0.00; wz[0] = -20.00; wsx[0] = 20.50; wsz[0] = 0.50;   // Wall_North
+    wx[1] = 0.00; wz[1] = 20.00; wsx[1] = 20.50; wsz[1] = 0.50;   // Wall_South
+    wx[2] = -20.00; wz[2] = 0.00; wsx[2] = 0.50; wsz[2] = 20.50;   // Wall_West
+    wx[3] = 20.00; wz[3] = 0.00; wsx[3] = 0.50; wsz[3] = 20.50;   // Wall_East
+    wx[4] = -12.50; wz[4] = 0.00; wsx[4] = 7.50; wsz[4] = 0.50;   // Divide_WestArm
+    wx[5] = 12.50; wz[5] = 0.00; wsx[5] = 7.50; wsz[5] = 0.50;   // Divide_EastArm
+    wx[6] = 0.00; wz[6] = -12.50; wsx[6] = 0.50; wsz[6] = 7.50;   // Divide_NorthArm
+    wx[7] = 0.00; wz[7] = 12.50; wsx[7] = 0.50; wsz[7] = 7.50;   // Divide_SouthArm
+    wx[8] = -12.00; wz[8] = -12.00; wsx[8] = 2.00; wsz[8] = 2.00;   // Pillar_NW
+    wx[9] = 12.00; wz[9] = -12.00; wsx[9] = 2.00; wsz[9] = 2.00;   // Pillar_NE
+    wx[10] = -12.00; wz[10] = 12.00; wsx[10] = 2.00; wsz[10] = 2.00;   // Pillar_SW
+    wx[11] = 12.00; wz[11] = 12.00; wsx[11] = 2.00; wsz[11] = 2.00;   // Pillar_SE
+    wx[12] = -4.00; wz[12] = -8.00; wsx[12] = 3.00; wsz[12] = 0.50;   // Baffle_N
+    wx[13] = 8.00; wz[13] = 4.00; wsx[13] = 0.50; wsz[13] = 3.00;   // Baffle_E
+    wx[14] = 4.00; wz[14] = 8.00; wsx[14] = 3.00; wsz[14] = 0.50;   // Baffle_S
+    wx[15] = -8.00; wz[15] = -4.00; wsx[15] = 0.50; wsz[15] = 3.00;   // Baffle_W
+
+    bx[0] = -15.50; bz[0] = -15.50;   // Beacon_NW
+    bx[1] = 15.50; bz[1] = -15.50;   // Beacon_NE
+    bx[2] = -15.50; bz[2] = 15.50;   // Beacon_SW
+    bx[3] = 15.50; bz[3] = 15.50;   // Beacon_SE
+
+    // --- player --------------------------------------------------------------
+    px = 0.0;
+    py = 1.7;
+    pz = 0.0;
+    yaw = 0.0;
+    pitch = 0.0;
+    eye = 1.7;
+    radius = 0.45;
+
+    // --- stalker -------------------------------------------------------------
+    sx = 0.0 - 16.0;
+    sy = 1.0;
+    sz = 0.0 - 6.0;
+
+    // --- game state ----------------------------------------------------------
+    charged = 0;
+    caught_count = 0;
+    // Playable from the first frame. Requiring a key to start meant that if it did
+    // not register you were left standing in a room you could not move in, with
+    // nothing on screen to say why.
+    state = 1;
+    want_lock = 1;
+    mouse_locked = 0;
+    bob = 0.0;
+    pulse = 0.0;
+    stare = 0.0;
+    ready = 1;
+}
+
+dt = get_dt();
+if (dt > 0.1) {
+    dt = 0.1;
+}
+
+// -----------------------------------------------------------------------------
+// Mouse capture. Nothing moves until the mouse is locked, which doubles as the
+// title screen: you are standing in the dark until you decide to start.
+// -----------------------------------------------------------------------------
+if (is_key_pressed(41)) {
+    want_lock = 0;
+}
+if (is_key_pressed(225)) {
+    want_lock = 1;
+}
+
+if (want_lock == 1) {
+    if (mouse_locked == 0) {
+        lock_mouse(1.0);
+        mouse_locked = 1;
+    }
+}
+if (want_lock == 0) {
+    if (mouse_locked == 1) {
+        lock_mouse(0.0);
+        mouse_locked = 0;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Look
+// -----------------------------------------------------------------------------
+if (mouse_locked == 1) {
+    if (state == 1) {
+        yaw = yaw - get_mouse_dx() * 0.0022;
+        pitch = pitch - get_mouse_dy() * 0.0022;
+        pitch = clamp(pitch, 0.0 - 1.35, 1.35);
+    }
+}
+
+// Camera basis, taken from the engine's own view matrix rather than guessed.
+// get_view_matrix() returns rotationX(pitch) * rotationY(yaw), and rotationY(t)
+// builds Ry(-t) - it is already an inverse, because it IS the view matrix. The
+// engine reads its own axes back out as right = row0, forward = -row2, giving
+//     forward = (-sin(yaw), 0, -cos(yaw))
+//     right   = ( cos(yaw), 0, -sin(yaw))
+// Both of these had the wrong sign on one component, which mirrors every input the
+// moment you turn away from yaw 0 - and mirrors the stalker's "is he looking at me"
+// test with them, so it froze when off screen and moved when on it.
+fx = 0.0 - sin(yaw);
+fz = 0.0 - cos(yaw);
+rx = cos(yaw);
+rz = 0.0 - sin(yaw);
+
+// -----------------------------------------------------------------------------
+// Walk, with the walls actually stopping you.
+//
+// The two axes are resolved separately: try X, undo it if it put us inside
+// something, then try Z the same way. Moving both at once and undoing both is
+// what makes a player stick to a wall they are only brushing against.
+// -----------------------------------------------------------------------------
+moving = 0;
+if (state == 1) {
+    walk = 2.7 * dt;
+    dx = 0.0;
+    dz = 0.0;
+
+    if (is_key_pressed(26)) {
+        dx = dx + fx;
+        dz = dz + fz;
+    }
+    if (is_key_pressed(22)) {
+        dx = dx - fx;
+        dz = dz - fz;
+    }
+    if (is_key_pressed(4)) {
+        dx = dx - rx;
+        dz = dz - rz;
+    }
+    if (is_key_pressed(7)) {
+        dx = dx + rx;
+        dz = dz + rz;
+    }
+
+    len = sqrt(dx * dx + dz * dz);
+    if (len > 0.001) {
+        dx = dx / len * walk;
+        dz = dz / len * walk;
+        moving = 1;
+
+        // ---- X axis ----
+        nx = px + dx;
+        blocked = 0;
+        i = 0;
+        while (i < wall_count) {
+            ax = abs(nx - wx[i]);
+            az = abs(pz - wz[i]);
+            if (ax < wsx[i] + radius) {
+                if (az < wsz[i] + radius) {
+                    blocked = 1;
+                }
+            }
+            i = i + 1;
+        }
+        if (blocked == 0) {
+            px = nx;
+        }
+
+        // ---- Z axis ----
+        nz = pz + dz;
+        blocked = 0;
+        i = 0;
+        while (i < wall_count) {
+            ax = abs(px - wx[i]);
+            az = abs(nz - wz[i]);
+            if (ax < wsx[i] + radius) {
+                if (az < wsz[i] + radius) {
+                    blocked = 1;
+                }
+            }
+            i = i + 1;
+        }
+        if (blocked == 0) {
+            pz = nz;
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Beacons
+// -----------------------------------------------------------------------------
+if (state == 1) {
+    i = 0;
+    while (i < 4) {
+        if (bcharged[i] < 0.5) {
+            ddx = px - bx[i];
+            ddz = pz - bz[i];
+            if (ddx * ddx + ddz * ddz < 5.3) {
+                bcharged[i] = 1.0;
+                charged = charged + 1;
+                pulse = 1.0;
+                print(charged);
+            }
+        }
+        i = i + 1;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// The stalker.
+//
+// Line of sight is marched by hand rather than raycast(): raycast goes through
+// the physics world, and these walls are plain scene geometry with no rigid
+// bodies, so it would report a clear path straight through every one of them.
+// -----------------------------------------------------------------------------
+tx = sx - px;
+tz = sz - pz;
+gap = sqrt(tx * tx + tz * tz);
+if (gap < 0.001) {
+    gap = 0.001;
+}
+ux = tx / gap;
+uz = tz / gap;
+
+facing = fx * ux + fz * uz;
+
+visible = 0;
+if (facing > 0.55) {
+    if (gap < 28.0) {
+        visible = 1;
+        // March the segment; if any sample lands inside a wall, it is hidden.
+        steps = 24;
+        s = 1;
+        while (s < steps) {
+            t = s / steps;
+            cx = px + tx * t;
+            cz = pz + tz * t;
+            i = 0;
+            while (i < wall_count) {
+                if (abs(cx - wx[i]) < wsx[i]) {
+                    if (abs(cz - wz[i]) < wsz[i]) {
+                        visible = 0;
+                    }
+                }
+                i = i + 1;
+            }
+            s = s + 1;
+        }
+    }
+}
+
+if (state == 1) {
+    if (visible == 1) {
+        // Held by your attention. It does not retreat, it does not look away.
+        stare = min(1.0, stare + dt * 2.5);
+    } else {
+        stare = max(0.0, stare - dt * 1.5);
+
+        // Faster with every beacon you light: the facility waking up is what
+        // wakes it up too.
+        pace = 1.55 + charged * 0.62 + caught_count * 0.18;
+        step = pace * dt;
+
+        mx = sx - ux * step;
+        mz = sz - uz * step;
+
+        // It is bound by the same walls you are, so corners genuinely shelter you.
+        blocked = 0;
+        i = 0;
+        while (i < wall_count) {
+            if (abs(mx - wx[i]) < wsx[i] + 0.5) {
+                if (abs(mz - wz[i]) < wsz[i] + 0.5) {
+                    blocked = 1;
+                }
+            }
+            i = i + 1;
+        }
+        if (blocked == 0) {
+            sx = mx;
+            sz = mz;
+        } else {
+            // Slide along the obstruction instead of grinding into it.
+            gx = sx - uz * step;
+            gz = sz + ux * step;
+            blocked = 0;
+            i = 0;
+            while (i < wall_count) {
+                if (abs(gx - wx[i]) < wsx[i] + 0.5) {
+                    if (abs(gz - wz[i]) < wsz[i] + 0.5) {
+                        blocked = 1;
+                    }
+                }
+                i = i + 1;
+            }
+            if (blocked == 0) {
+                sx = gx;
+                sz = gz;
+            }
+        }
+    }
+
+    // ---- caught ----
+    if (gap < 1.15) {
+        caught_count = caught_count + 1;
+        print(0.0 - 1.0);
+
+        // It takes a beacon back with it. Recoverable, but you lose ground.
+        i = 3;
+        taken = 0;
+        while (i >= 0) {
+            if (taken == 0) {
+                if (bcharged[i] > 0.5) {
+                    bcharged[i] = 0.0;
+                    charged = charged - 1;
+                    taken = 1;
+                }
+            }
+            i = i - 1;
+        }
+
+        px = 0.0;
+        pz = 0.0;
+        sx = 0.0 - 16.0;
+        sz = 0.0 - 6.0;
+        pulse = 1.0;
+    }
+
+    // ---- escaped ----
+    if (charged >= 4) {
+        if (px * px + pz * pz < 6.0) {
+            state = 3;
+            print(999.0);
+            lock_mouse(0.0);
+            mouse_locked = 0;
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Camera feel. There is no HUD to draw to, so everything the game needs to tell
+// you is told through the camera and through the stalker's own surface.
+// -----------------------------------------------------------------------------
+if (moving == 1) {
+    bob = bob + dt * 9.0;
+} else {
+    bob = bob + dt * 1.6;
+}
+
+sway = sin(bob) * 0.045;
+if (moving == 0) {
+    sway = sin(bob) * 0.012;
+}
+
+pulse = max(0.0, pulse - dt * 2.2);
+
+// Closer means less steady. Under about six metres your hands start to go.
+dread = clamp((9.0 - gap) / 9.0, 0.0, 1.0);
+if (visible == 1) {
+    dread = dread * 0.35;
+}
+shake = dread * dread * 0.030;
+
+cam_pitch = pitch + (rand() - 0.5) * shake + pulse * 0.05;
+cam_yaw = yaw + (rand() - 0.5) * shake;
+
+set_cam_pos(px, eye + sway + pulse * 0.22, pz);
+set_cam_rot(cam_pitch, cam_yaw);
+
+// -----------------------------------------------------------------------------
+// The stalker's body. Always faces you, so you never catch it side-on.
+// -----------------------------------------------------------------------------
+set_position(sx, sy, sz);
+set_rotation(0.0, yaw + 3.14159, 0.0);
+
+// Barely lit, and lit a little more when it knows you can see it. Enough to
+// resolve a shape at the end of a corridor and not enough to be sure.
+glow = 0.035 + stare * 0.5 + dread * 0.22;
+set_emissive(glow);
+set_color(0.10 + stare * 0.55, 0.03, 0.04 + dread * 0.10);
+
+if (state == 3) {
+    // Escaped: it is left standing where it stopped.
+    set_emissive(0.0);
+    set_color(0.02, 0.02, 0.02);
+}
+
+// -----------------------------------------------------------------------------
+// Charged beacons power up.
+//
+// find_actors is centred on the beacon rather than on this script's own actor:
+// the stalker is nowhere near the thing that just lit, and an owner-relative
+// query would never reach it.
+// -----------------------------------------------------------------------------
+i = 0;
+while (i < 4) {
+    if (bcharged[i] > 0.5) {
+        n = find_actors(bx[i], 1.4, bz[i], 1.4);
+        j = 0;
+        while (j < n) {
+            set_nearby_emissive(j, 2.6);
+            set_nearby_color(j, 0.55, 0.95, 1.0);
+            j = j + 1;
+        }
+    }
+    i = i + 1;
+}
+
+// -----------------------------------------------------------------------------
+// HUD: four markers for the beacons, and the edges of the screen for everything
+// you are supposed to feel rather than read.
+// -----------------------------------------------------------------------------
+i = 0;
+while (i < 4) {
+    hud_pip(i, bcharged[i]);
+    i = i + 1;
+}
+
+if (state == 3) {
+    hud_vignette(0.8, 1.0, 0.88, 0.65);
+} else {
+    vig = dread * 0.9 + pulse * 0.55;
+    hud_vignette(clamp(vig, 0.0, 1.0), 0.8, 0.03, 0.04);
+}

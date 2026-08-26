@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=Lithium Engine
+Exec=Lithium_Engine
+Icon=lithium-engine
+Categories=Development;
+Terminal=true

@@ -1,0 +1,77 @@
+// First-Person Controller in C-Minus
+// Attach this script to any Actor in the scene (e.g. Player character).
+// Use WASD keys to move relative to the camera direction.
+// Use Arrow keys (Left/Right/Up/Down) to look around.
+
+if (initialized == 0) {
+    cx = 0.0;
+    cy = 1.8;
+    cz = 5.0;
+    pitch = 0.0;
+    yaw = 0.0;
+    initialized = 1;
+}
+
+dt = get_dt();
+speed = 5.0 * dt;
+rot_speed = 1.5 * dt;
+
+// 1. Look controls (Arrow keys)
+// Left Arrow = scancode 80
+if (is_key_pressed(80)) {
+    yaw = yaw + rot_speed;
+}
+// Right Arrow = scancode 79
+if (is_key_pressed(79)) {
+    yaw = yaw - rot_speed;
+}
+// Up Arrow = scancode 82
+if (is_key_pressed(82)) {
+    pitch = pitch + rot_speed;
+}
+// Down Arrow = scancode 81
+if (is_key_pressed(81)) {
+    pitch = pitch - rot_speed;
+}
+
+// Clamp pitch between -1.4 and 1.4 radians to prevent flipping over
+if (pitch > 1.4) {
+    pitch = 1.4;
+}
+if (pitch < -1.4) {
+    pitch = -1.4;
+}
+
+// 2. Walk controls (WASD keys)
+// Calculate horizontal direction vectors from yaw
+// forward = (sin(yaw), 0, -cos(yaw))
+// right   = (cos(yaw), 0, sin(yaw))
+fx = sin(yaw);
+fz = 0.0 - cos(yaw);
+rx = cos(yaw);
+rz = sin(yaw);
+
+// W = scancode 26
+if (is_key_pressed(26)) {
+    cx = cx + fx * speed;
+    cz = cz + fz * speed;
+}
+// S = scancode 22
+if (is_key_pressed(22)) {
+    cx = cx - fx * speed;
+    cz = cz - fz * speed;
+}
+// A = scancode 4
+if (is_key_pressed(4)) {
+    cx = cx - rx * speed;
+    cz = cz - rz * speed;
+}
+// D = scancode 7
+if (is_key_pressed(7)) {
+    cx = cx + rx * speed;
+    cz = cz + rz * speed;
+}
+
+// 3. Apply position and rotation to the engine camera
+set_cam_pos(cx, cy, cz);
+set_cam_rot(pitch, yaw);

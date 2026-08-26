@@ -1,0 +1,166 @@
+#include "core/engine.hpp"
+#include "core/selftest.hpp"
+#include "core/platform.hpp"
+#include "renderer/rhi/renderer_api.hpp"
+#include <iostream>
+#include <fstream>
+#include <cstdlib>
+#include <string.h>
+#include <nlohmann/json.hpp>
+#include <filesystem>
+#include <vector>
+#include <string>
+using json = nlohmann::json;
+
+Engine* g_engine = nullptr;
+
+// Every asset path in the engine ("Content/...", "EngineContent/...") is relative to
+// the working directory, which means launching from anywhere other than the install
+// folder finds nothing. Rather than rewrite hundreds of call sites, anchor the working
+// directory to the executable itself at startup.
+//
+// Any file argument the user passed is resolved to an absolute path *first*, so a
+// relative path on the command line still means what the user's shell meant by it.
+static void anchor_working_directory_to_executable(int argc, char* argv[],
+                                                   std::vector<std::string>& out_args) {
+    out_args.clear();
+    for (int i = 0; i < argc; ++i) {
+        std::string a = argv[i];
+        if (i > 0 && !a.empty() && a[0] != '-' && std::filesystem::exists(a)) {
+            std::error_code ec;
+            std::filesystem::path abs = std::filesystem::absolute(a, ec);
+            if (!ec) a = abs.string();
+        }
+        out_args.push_back(a);
+    }
+
+    std::filesystem::path dir = Platform::executable_dir();
+    if (dir.empty()) return;
+    std::error_code ec;
+    std::filesystem::current_path(dir, ec);
+}
+
+int main(int argc, char* argv[]) {
+    // Mesa-only override that lets an older Intel driver expose OpenGL 4.5.
+    // Meaningless on Windows, where the vendor driver reports its real version, and
+    // setenv() is not part of the MSVC/MinGW CRT.
+#if LITHIUM_PLATFORM_LINUX
+    setenv("MESA_GL_VERSION_OVERRIDE", "4.5", 1);
+    setenv("MESA_GLSL_VERSION_OVERRIDE", "450", 1);
+#endif
+
+    std::vector<std::string> anchored_args;
+    anchor_working_directory_to_executable(argc, argv, anchored_args);
+    std::vector<char*> argv_storage;
+    for (auto& a : anchored_args) argv_storage.push_back(const_cast<char*>(a.c_str()));
+    argv = argv_storage.data();
+    
+    std::ofstream log_file("LithiumEngine_Startup.log");
+    std::streambuf* old_cerr = std::cerr.rdbuf(log_file.rdbuf());
+    std::streambuf* old_cout = std::cout.rdbuf(log_file.rdbuf());
+    
+    Engine engine;
+    g_engine = &engine;
+
+    std::string initial_scene = "";
+    bool api_flag_passed = false;
+
+    // Default API
+    RHI::RendererAPI::current_api = RHI::BackendAPI::OpenGL;
+
+    // Load config if it exists
+    std::string config_path = "engine_config.json";
+    if (std::filesystem::exists(config_path)) {
+        try {
+            std::ifstream config_file(config_path);
+            json config_json;
+            config_file >> config_json;
+            if (config_json.contains("graphics_api")) {
+                std::string api_str = config_json["graphics_api"];
+                if (api_str == "vulkan") RHI::RendererAPI::current_api = RHI::BackendAPI::Vulkan;
+                else if (api_str == "opengl") RHI::RendererAPI::current_api = RHI::BackendAPI::OpenGL;
+            }
+        } catch (const std::exception& e) {
+            std::cerr << "Failed to parse engine config: " << e.what() << std::endl;
+        }
+    }
+
+    float explicit_screenshot_delay = -1.0f;
+    bool run_selftest_requested = false;
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--vulkan") == 0) {
+            RHI::RendererAPI::current_api = RHI::BackendAPI::Vulkan;
+            api_flag_passed = true;
+        } else if (strcmp(argv[i], "--opengl") == 0) {
+            RHI::RendererAPI::current_api = RHI::BackendAPI::OpenGL;
+            api_flag_passed = true;
+        } else if (std::string(argv[i]).find(".lithium") != std::string::npos) {
+            initial_scene = argv[i];
+        } else if (strncmp(argv[i], "--auto-screenshot=", 18) == 0) {
+            // Automated/CI screenshot capture: after a short warm-up delay, grab a
+            // frame straight from the GL backbuffer (via Engine::take_screenshot,
+            // the same path F9 uses) and exit. Useful for headless verification
+            // where there's no interactive session to press F9 in.
+            engine.auto_screenshot_path = std::string(argv[i]).substr(18); // text after "--auto-screenshot="
+            // Default warm-up: let async resource loads and TAA history settle.
+            // Only applied if --screenshot-delay hasn't already set one, so the two
+            // flags can be given in either order.
+            if (engine.auto_screenshot_delay < 0.0f) engine.auto_screenshot_delay = 12.0f;
+        } else if (strcmp(argv[i], "--selftest") == 0) {
+            run_selftest_requested = true;
+        } else if (strcmp(argv[i], "--auto-launch") == 0) {
+            engine.auto_launch = true;
+        } else if (strncmp(argv[i], "--screenshot-delay=", 19) == 0) {
+            // Overrides the default warm-up delay, so early states (the main menu
+            // and launcher) can be captured too rather than only the settled editor.
+            explicit_screenshot_delay = static_cast<float>(std::atof(std::string(argv[i]).substr(19).c_str()));
+        }
+    }
+
+    if (explicit_screenshot_delay >= 0.0f) engine.auto_screenshot_delay = explicit_screenshot_delay;
+
+    // Save config if it was changed by CLI flags or doesn't exist
+    if (api_flag_passed || !std::filesystem::exists(config_path)) {
+        json config_json;
+        if (std::filesystem::exists(config_path)) {
+            std::ifstream config_file(config_path);
+            config_file >> config_json;
+        }
+        config_json["graphics_api"] = (RHI::RendererAPI::current_api == RHI::BackendAPI::Vulkan) ? "vulkan" : "opengl";
+        std::ofstream out_file(config_path);
+        out_file << config_json.dump(4);
+    }
+
+    bool is_standalone = false;
+#ifdef STANDALONE_GAME
+    is_standalone = true;
+#endif
+
+    if (!engine.initialize(initial_scene, is_standalone)) {
+        std::cerr << "Failed to initialize engine." << std::endl;
+        return -1;
+    }
+
+    if (run_selftest_requested) {
+        // The subsystems under test need the renderer and physics up, which
+        // initialize() leaves until a project is actually opened.
+        if (!engine.initialize_runtime()) {
+            std::cerr << "Self-test could not bring up the runtime." << std::endl;
+            return -1;
+        }
+        const int failures = run_selftest(engine);
+        engine.shutdown();
+        std::cerr.rdbuf(old_cerr);
+        std::cout.rdbuf(old_cout);
+        return failures;
+    }
+
+    std::cout << "Engine initialized successfully. Starting launcher..." << std::endl;
+    engine.run();
+
+    std::cout << "Engine shutting down." << std::endl;
+    
+    std::cerr.rdbuf(old_cerr);
+    std::cout.rdbuf(old_cout);
+    return 0;
+}

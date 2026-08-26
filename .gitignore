@@ -1,0 +1,40 @@
+# Build trees
+build/
+build-win/
+build_debug/
+build_asan/
+AppDir/
+release_builds/
+Lithium_Engine_Releases/
+"Lithium_Engine_Releases (2)"/
+CMakeCache.txt
+CMakeFiles/
+
+# Packaged output — large, regenerable
+*.AppImage
+*.zip
+*.deb
+Lithium_Game
+a.out
+lib/
+
+# Editor / runtime state
+imgui.ini
+LithiumEngine_Startup.log
+*.log
+
+# Scratch
+scratch/
+scratch_engine.txt
+
+# Vendored dependencies — 340MB of prebuilt libs, two carry their own .git.
+# Not tracked: re-fetch these rather than versioning them here.
+#   embree, embree_windows, SDL2_windows  (prebuilt binaries)
+#   imgui, imnodes                        (upstream git checkouts)
+#   miniaudio                             (single-header)
+thirdparty/
+
+# Large binary assets / captures
+*.png
+*.jpg
+*.hdr
