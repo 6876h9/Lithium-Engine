@@ -2,6 +2,7 @@
 
 #include "core/engine.hpp"
 #include "core/asset_database.hpp"
+#include "core/scene_serializer.hpp"
 #include "world/actor.hpp"
 #include "world/editor_primitive_actor.hpp"
 #include "world/static_mesh_component.hpp"
@@ -94,6 +95,78 @@ int run_selftest(Engine& engine) {
     actors.clear();
     build_test_room(actors);
     check(actors.size() == 5, "test room built");
+
+    // --- Scene references survive a rename ----------------------------------
+    // The end-to-end version of the asset-identity claim, through a real .lithium
+    // file rather than the database API. This is the failure the sidecars exist to
+    // prevent, so it is asserted on the actual save/load path a project uses.
+    section("Scene survives an asset rename");
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        const fs::path root = fs::temp_directory_path(ec) / "lithium_scene_rename_selftest";
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        const fs::path original = root / "Crate.mesh";
+        const fs::path renamed  = root / "Crate_Final.mesh";
+        { std::ofstream f(original); f << "placeholder"; }
+
+        AssetDatabase& db = AssetDatabase::get();
+        db.scan({ root.string() });
+        const std::string guid = db.guid_for_path(original.string());
+        check(!guid.empty(), "the referenced asset has an identity");
+
+        // A scene with one actor pointing at that mesh.
+        std::vector<std::shared_ptr<Actor>> scene_actors;
+        {
+            auto a = std::make_shared<Actor>("Crate");
+            a->shape_type = "StaticMesh";
+            a->mesh_path = AssetDatabase::normalize_path(original.string());
+            scene_actors.push_back(a);
+        }
+
+        const fs::path scene_file = root / "level.lithium";
+        SceneSerializer::save_scene(scene_file.string(), scene_actors);
+        check(fs::exists(scene_file, ec), "scene saved");
+
+        // The saved file must carry both halves.
+        {
+            std::ifstream in(scene_file);
+            nlohmann::json scene_json;
+            in >> scene_json;
+            bool found_guid = false;
+            for (const auto& actor_json : scene_json["actors"]) {
+                if (actor_json.contains("mesh_guid") &&
+                    actor_json["mesh_guid"] == guid) { found_guid = true; break; }
+            }
+            check(found_guid, "the saved scene stores the mesh GUID alongside its path");
+        }
+
+        // Rename the asset, sidecar and all, exactly as a person reorganising a
+        // content folder would.
+        fs::rename(original, renamed, ec);
+        fs::rename(fs::path(original.string() + ".meta"),
+                   fs::path(renamed.string() + ".meta"), ec);
+        check(!ec, "asset and its sidecar renamed");
+        check(!fs::exists(original, ec), "the old path is genuinely gone");
+        db.scan({ root.string() });
+
+        std::vector<std::shared_ptr<Actor>> loaded;
+        SceneSerializer::load_scene(scene_file.string(), loaded);
+        check(loaded.size() == 1, "scene reloaded");
+        if (loaded.size() == 1) {
+            const std::string expected = AssetDatabase::normalize_path(renamed.string());
+            check(loaded[0]->mesh_path == expected,
+                  "the actor now points at the renamed asset");
+            // Before the sidecars this is exactly what happened instead.
+            check(loaded[0]->mesh_path != AssetDatabase::normalize_path(original.string()),
+                  "and not at the path that no longer exists");
+        }
+
+        fs::remove_all(root, ec);
+    }
 
     // --- Native C++ scripting ----------------------------------------------
     // An exported game must not need a compiler on the player's machine. That
