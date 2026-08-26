@@ -12,7 +12,6 @@
 #include <thread>
 #include <atomic>
 #include "core/threading/task_graph.hpp"
-#include "renderer/rhi/renderer_api.hpp"
 #include "world/static_mesh_component.hpp"
 #include "world/particle_emitter_component.hpp"
 #include "renderer/material_shader.hpp"
@@ -193,10 +192,6 @@ public:
     bool auto_launch = false;
     float auto_screenshot_elapsed = 0.0f;
     
-    void request_api_swap(RHI::BackendAPI new_api) {
-        pending_api_swap = new_api;
-    }
-    
     std::vector<std::shared_ptr<Actor>>& get_actors() { return actors; }
 
 private:
@@ -325,6 +320,4 @@ private:
     std::thread logic_thread;
     std::mutex scene_mutex;
     void logic_loop();
-
-    std::atomic<RHI::BackendAPI> pending_api_swap{RHI::BackendAPI::None};
 };

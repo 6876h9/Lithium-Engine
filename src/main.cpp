@@ -1,7 +1,6 @@
 #include "core/engine.hpp"
 #include "core/selftest.hpp"
 #include "core/platform.hpp"
-#include "renderer/rhi/renderer_api.hpp"
 #include <iostream>
 #include <fstream>
 #include <cstdlib>
@@ -63,12 +62,10 @@ int main(int argc, char* argv[]) {
     g_engine = &engine;
 
     std::string initial_scene = "";
-    bool api_flag_passed = false;
 
-    // Default API
-    RHI::RendererAPI::current_api = RHI::BackendAPI::OpenGL;
-
-    // Load config if it exists
+    // This renderer targets the OpenGL 4.5 core profile and has no second backend.
+    // The config's legacy "graphics_api" key is read only to warn when it asks for
+    // something that does not exist, rather than being silently ignored.
     std::string config_path = "engine_config.json";
     if (std::filesystem::exists(config_path)) {
         try {
@@ -77,8 +74,11 @@ int main(int argc, char* argv[]) {
             config_file >> config_json;
             if (config_json.contains("graphics_api")) {
                 std::string api_str = config_json["graphics_api"];
-                if (api_str == "vulkan") RHI::RendererAPI::current_api = RHI::BackendAPI::Vulkan;
-                else if (api_str == "opengl") RHI::RendererAPI::current_api = RHI::BackendAPI::OpenGL;
+                if (api_str != "opengl") {
+                    std::cerr << "engine_config.json requests graphics_api \"" << api_str
+                              << "\", which this build does not provide. Using OpenGL."
+                              << std::endl;
+                }
             }
         } catch (const std::exception& e) {
             std::cerr << "Failed to parse engine config: " << e.what() << std::endl;
@@ -89,11 +89,11 @@ int main(int argc, char* argv[]) {
     bool run_selftest_requested = false;
     for (int i = 1; i < argc; ++i) {
         if (strcmp(argv[i], "--vulkan") == 0) {
-            RHI::RendererAPI::current_api = RHI::BackendAPI::Vulkan;
-            api_flag_passed = true;
+            std::cerr << "--vulkan: this build has no Vulkan backend. Using OpenGL."
+                      << std::endl;
         } else if (strcmp(argv[i], "--opengl") == 0) {
-            RHI::RendererAPI::current_api = RHI::BackendAPI::OpenGL;
-            api_flag_passed = true;
+            // Accepted for compatibility with existing launch scripts; already the
+            // only backend.
         } else if (std::string(argv[i]).find(".lithium") != std::string::npos) {
             initial_scene = argv[i];
         } else if (strncmp(argv[i], "--auto-screenshot=", 18) == 0) {
@@ -119,14 +119,9 @@ int main(int argc, char* argv[]) {
 
     if (explicit_screenshot_delay >= 0.0f) engine.auto_screenshot_delay = explicit_screenshot_delay;
 
-    // Save config if it was changed by CLI flags or doesn't exist
-    if (api_flag_passed || !std::filesystem::exists(config_path)) {
+    if (!std::filesystem::exists(config_path)) {
         json config_json;
-        if (std::filesystem::exists(config_path)) {
-            std::ifstream config_file(config_path);
-            config_file >> config_json;
-        }
-        config_json["graphics_api"] = (RHI::RendererAPI::current_api == RHI::BackendAPI::Vulkan) ? "vulkan" : "opengl";
+        config_json["graphics_api"] = "opengl";
         std::ofstream out_file(config_path);
         out_file << config_json.dump(4);
     }

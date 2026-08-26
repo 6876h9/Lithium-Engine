@@ -5,7 +5,6 @@
 #include <nlohmann/json.hpp>
 #include "core/engine.hpp"
 #include "world/cpp_script_component.hpp"
-#include "renderer/rhi/renderer_api.hpp"
 #include "world/light_components.hpp"
 #include "world/editor_primitive_actor.hpp"
 #include "world/directional_light_actor.hpp"
@@ -1020,22 +1019,6 @@ void Editor::draw_menu_bar(std::vector<std::shared_ptr<Actor>>& actors, bool& ou
             }
             if (ImGui::MenuItem("Visual Script Editor")) {
                 show_visual_script_editor = true;
-            }
-            ImGui::Separator();
-            if (ImGui::BeginMenu("Graphics API (Live Swap)")) {
-                bool is_gl = (RHI::RendererAPI::current_api == RHI::BackendAPI::OpenGL);
-                bool is_vk = (RHI::RendererAPI::current_api == RHI::BackendAPI::Vulkan);
-                if (ImGui::MenuItem("OpenGL (Default)", NULL, is_gl)) {
-                    if (!is_gl && g_engine) {
-                        g_engine->request_api_swap(RHI::BackendAPI::OpenGL);
-                    }
-                }
-                if (ImGui::MenuItem("Vulkan (Experimental)", NULL, is_vk)) {
-                    if (!is_vk && g_engine) {
-                        g_engine->request_api_swap(RHI::BackendAPI::Vulkan);
-                    }
-                }
-                ImGui::EndMenu();
             }
             ImGui::EndMenu();
         }

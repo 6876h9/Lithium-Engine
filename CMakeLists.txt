@@ -77,6 +77,7 @@ set(SOURCES
     src/core/noise.cpp
     src/core/model_importer.cpp
     src/core/mesh_simplifier.cpp
+    src/core/asset_database.cpp
     src/core/scene_serializer.cpp
     src/core/selftest.cpp
     src/core/visual_script_editor.cpp
@@ -84,9 +85,6 @@ set(SOURCES
     src/renderer/tesla.cpp
     src/renderer/material_shader.cpp
     src/renderer/lightmapper.cpp
-    src/renderer/rhi/renderer_api.cpp
-    src/renderer/rhi/opengl/opengl_renderer_api.cpp
-    src/renderer/rhi/vulkan/vulkan_renderer_api.cpp
     src/world/actor.cpp
     src/world/component.cpp
     src/world/static_mesh_component.cpp
@@ -194,6 +192,14 @@ FetchContent_Declare(
     SOURCE_SUBDIR  "Build"
 )
 FetchContent_MakeAvailable(JoltPhysics)
+
+# Jolt compiles itself with -Werror. Jolt v5.0.0 predates GCC's current
+# -Wmaybe-uninitialized analysis, which now fires inside SoftBodyMotionProperties
+# and turns a third-party warning into a failed build of this engine. Downgrade
+# -Werror for Jolt's own target only - warnings on engine code stay fatal.
+if (TARGET Jolt AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(Jolt PRIVATE -Wno-error)
+endif()
 
 # Fetch Lua (gameplay scripting)
 #

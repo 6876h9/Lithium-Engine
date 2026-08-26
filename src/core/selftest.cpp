@@ -1,6 +1,7 @@
 #include "core/selftest.hpp"
 
 #include "core/engine.hpp"
+#include "core/asset_database.hpp"
 #include "world/actor.hpp"
 #include "world/editor_primitive_actor.hpp"
 #include "world/static_mesh_component.hpp"
@@ -15,6 +16,8 @@
 #include "renderer/lightmapper.hpp"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -90,6 +93,67 @@ int run_selftest(Engine& engine) {
     actors.clear();
     build_test_room(actors);
     check(actors.size() == 5, "test room built");
+
+    // --- Asset identity ----------------------------------------------------
+    // The whole point of the GUID sidecars is that a reference survives the file
+    // being renamed. That is the case that used to break scenes silently, so it is
+    // the case asserted here - against real files on disk, not a mocked map.
+    section("Asset database");
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        const fs::path root = fs::temp_directory_path(ec) / "lithium_assetdb_selftest";
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        const fs::path original = root / "Prop.mesh";
+        const fs::path renamed  = root / "Prop_Renamed.mesh";
+        { std::ofstream f(original); f << "not a real mesh"; }
+
+        AssetDatabase& db = AssetDatabase::get();
+        db.scan({ root.string() });
+
+        const std::string guid = db.guid_for_path(original.string());
+        check(guid.size() == 32, "an asset is assigned a 32-character GUID");
+        check(fs::exists(original.string() + ".meta", ec), "a .meta sidecar is written beside it");
+
+        // A scene saves both halves; this is what that JSON looks like.
+        nlohmann::json ref;
+        db.write_ref(ref, "mesh_path", original.string());
+        check(ref.contains("mesh_guid"), "write_ref stores the GUID alongside the path");
+
+        // Now do the thing that used to lose the reference.
+        fs::rename(original, renamed, ec);
+        check(!ec, "asset renamed on disk");
+        fs::rename(fs::path(original.string() + ".meta"),
+                   fs::path(renamed.string() + ".meta"), ec);
+        db.scan({ root.string() });
+
+        check(db.path_for_guid(guid) == AssetDatabase::normalize_path(renamed.string()),
+              "the GUID now resolves to the new path");
+
+        const std::string resolved = db.read_ref(ref, "mesh_path");
+        check(resolved == AssetDatabase::normalize_path(renamed.string()),
+              "a scene reference written before the rename still resolves");
+        check(resolved != original.string(), "and no longer points at the old path");
+
+        // A scene written before any of this existed has a path and no GUID. It has
+        // to keep loading exactly as it did.
+        nlohmann::json legacy;
+        legacy["mesh_path"] = "Content/Legacy.mesh";
+        check(db.read_ref(legacy, "mesh_path") == "Content/Legacy.mesh",
+              "a GUID-less legacy reference falls back to its path");
+
+        // An unknown GUID must not resolve to something arbitrary.
+        nlohmann::json dangling;
+        dangling["mesh_path"] = "Content/Gone.mesh";
+        dangling["mesh_guid"] = std::string(32, 'a');
+        check(db.read_ref(dangling, "mesh_path") == "Content/Gone.mesh",
+              "an unresolvable GUID falls back rather than inventing a path");
+
+        fs::remove_all(root, ec);
+    }
 
     // --- Collision layers --------------------------------------------------
     section("Collision layers");
