@@ -9,6 +9,7 @@
 #include "world/joint_component.hpp"
 #include "world/nav_agent_component.hpp"
 #include "world/particle_emitter_component.hpp"
+#include "world/cpp_script_component.hpp"
 #include "world/ui_canvas_component.hpp"
 #include "world/terrain_component.hpp"
 #include "physics/physics_engine.hpp"
@@ -93,6 +94,84 @@ int run_selftest(Engine& engine) {
     actors.clear();
     build_test_room(actors);
     check(actors.size() == 5, "test room built");
+
+    // --- Native C++ scripting ----------------------------------------------
+    // An exported game must not need a compiler on the player's machine. That
+    // depends on two things holding: a script can be built to a module ahead of
+    // time, and the runtime prefers that module over invoking the compiler. Both
+    // are asserted here, because a break in either only shows up on someone else's
+    // machine where there is no toolchain to fall back on.
+    section("Native C++ scripting");
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        const fs::path root = fs::temp_directory_path(ec) / "lithium_script_selftest";
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        const fs::path source = root / "SelfTestScript.cpp";
+        {
+            std::ofstream f(source);
+            f << "#include \"world/actor.hpp\"\n"
+              << "extern \"C\" {\n"
+              << "void on_begin_play(Actor* self) { (void)self; }\n"
+              << "void on_tick(Actor* self, float dt) {\n"
+              << "    self->get_actor_transform().rotation.y += dt;\n"
+              << "}\n"
+              << "}\n";
+        }
+
+        const std::string module_name = CppScriptComponent::module_name_for(source.string());
+        check(module_name.find("SelfTestScript") == 0, "module name derives from the script name");
+
+        const fs::path module_path = root / module_name;
+        std::string log;
+        const bool built = CppScriptComponent::compile_script(source.string(), module_path.string(), log);
+
+        if (!built && log.find("No C++ compiler") != std::string::npos) {
+            // No toolchain on this machine. That is exactly the situation an
+            // exported game is in, and it is not a failure of the engine.
+            std::cout << "  [skip] no C++ compiler present; ahead-of-time build not exercised"
+                      << std::endl;
+        } else {
+            check(built, "a script compiles ahead of time to a loadable module");
+            if (!built) std::cout << log << std::endl;
+            check(fs::exists(module_path, ec), "the module lands where export would put it");
+
+            // The runtime looks for modules under kModuleDir relative to the working
+            // directory, which is what an exported game's layout provides.
+            const fs::path shipped_dir = fs::path(CppScriptComponent::kModuleDir);
+            fs::create_directories(shipped_dir, ec);
+            const fs::path shipped = shipped_dir / module_name;
+            fs::copy_file(module_path, shipped, fs::copy_options::overwrite_existing, ec);
+            check(!ec, "module staged into the shipped Scripts directory");
+
+            // Point a component at a source path that does NOT exist, so the only way
+            // it can come up is via the precompiled module. That is precisely the
+            // exported-game case: the .cpp is not shipped, only the module is.
+            const fs::path absent_source = root / "SelfTestScript.cpp";
+            fs::remove(absent_source, ec);
+
+            Actor probe("ScriptProbe");
+            auto* script = probe.create_component<CppScriptComponent>("Script", absent_source.string());
+            check(script != nullptr, "script component constructed");
+            if (script) {
+                check(!script->has_error,
+                      "a shipped module loads with no source and no compiler invocation");
+
+                const float before = probe.get_actor_transform().rotation.y;
+                script->tick(0.5f);
+                check(probe.get_actor_transform().rotation.y > before,
+                      "its on_tick actually runs and mutates the actor");
+            }
+
+            fs::remove(shipped, ec);
+            fs::remove_all(shipped_dir, ec);
+        }
+
+        fs::remove_all(root, ec);
+    }
 
     // --- Asset identity ----------------------------------------------------
     // The whole point of the GUID sidecars is that a reference survives the file

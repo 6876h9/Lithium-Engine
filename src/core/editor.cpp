@@ -423,6 +423,58 @@ bool Editor::run_build(std::vector<std::shared_ptr<Actor>>& actors, const std::s
         problems += "  - scene could not be written\n";
     }
 
+    // Native C++ scripts are built here rather than in the shipped game. Compiling
+    // on the player's machine would make a C++ toolchain a requirement for running
+    // the game, and the exported directory has no engine headers to compile
+    // against anyway - so every script the project uses is turned into a module up
+    // front and the runtime only loads it.
+    {
+        std::vector<std::string> scripts;
+        for (const auto& actor : actors) {
+            if (!actor) continue;
+            if (auto* cs = actor->get_component<CppScriptComponent>()) {
+                if (!cs->script_path.empty() &&
+                    std::find(scripts.begin(), scripts.end(), cs->script_path) == scripts.end()) {
+                    scripts.push_back(cs->script_path);
+                }
+            }
+        }
+
+        if (!scripts.empty()) {
+            const fs::path module_dir = dest / CppScriptComponent::kModuleDir;
+            fs::create_directories(module_dir, ec);
+            ec.clear();
+
+            // Cross-compiling a script for Windows needs the MinGW toolchain, which
+            // the host compiler is not. Rather than emit modules the target cannot
+            // load, say so and name the scripts affected.
+            if (windows_target) {
+                problems += "  - " + std::to_string(scripts.size()) +
+                            " native C++ script(s) were not built: cross-compiling them for\n"
+                            "    Windows requires a MinGW toolchain. Use C-Minus or Lua for\n"
+                            "    scripts that must ship in a Windows build.\n";
+            } else {
+                for (const std::string& script : scripts) {
+                    const fs::path out_module =
+                        module_dir / CppScriptComponent::module_name_for(script);
+                    std::string log;
+                    if (CppScriptComponent::compile_script(script, out_module.string(), log)) {
+                        ++copied;
+                    } else {
+                        problems += "  - script " + script + ":\n";
+                        // The compiler's own diagnostics are the useful part; indent
+                        // them so they read as belonging to this entry.
+                        std::istringstream lines(log);
+                        std::string line;
+                        while (std::getline(lines, line)) {
+                            if (!line.empty()) problems += "      " + line + "\n";
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Runtime payload. lib/ only matters for the Linux target; Windows keeps its DLLs
     // beside the executable, so those are picked up by the loop below instead.
     std::vector<std::string> payload = { "Content", "shaders", "assets" };
