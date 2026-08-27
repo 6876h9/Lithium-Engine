@@ -1663,7 +1663,11 @@ bool Renderer::initialize(int width, int height) {
     // with an empty log followed by a link failure, and left a non-zero but unlinked
     // program handle that the cluster-culling paths would still try to use.
     culling_compute_program = 0;
-    unsigned int compute_shader = glCreateShader(GL_COMPUTE_SHADER);
+    // glDispatchCompute is loaded optionally, so it can legitimately be null here -
+    // Wine on this same Intel part exposes no compute at all. Checked before the
+    // shader is even created, so the program handle can never end up non-zero with
+    // no way to dispatch it.
+    unsigned int compute_shader = glDispatchCompute ? glCreateShader(GL_COMPUTE_SHADER) : 0;
     if (compute_shader == 0) {
         std::cout << "[Renderer] Compute shaders unavailable on this driver; "
                      "GPU cluster culling disabled (rendering is unaffected)." << std::endl;

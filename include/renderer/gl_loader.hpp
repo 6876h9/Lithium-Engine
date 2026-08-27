@@ -239,6 +239,26 @@ inline bool load_gl_functions() {
             return false; \
         }
 
+    // Entry points the renderer already knows how to do without. A missing one
+    // leaves the pointer null and disables the feature that uses it, rather than
+    // refusing to start: the renderer's own log says "Compute shaders unavailable
+    // on this driver; GPU cluster culling disabled (rendering is unaffected)", and
+    // that is only reachable if loading got far enough to say it.
+    #define LOAD_PROC_OPTIONAL(type, name) \
+        name = (type)SDL_GL_GetProcAddress(#name);
+
+    // For the handful of entry points stored in a renamed variable on Windows. The
+    // driver knows them by their real GL name, so the name to ask for has to be
+    // given separately from the variable to store them in - LOAD_PROC's #name would
+    // stringify the variable and request "lithium_glActiveTexture", which no driver
+    // has ever exported.
+    #define LOAD_PROC_NAMED(type, var, gl_name) \
+        var = (type)SDL_GL_GetProcAddress(gl_name); \
+        if (!var) { \
+            std::cerr << "Failed to load OpenGL function: " << gl_name << std::endl; \
+            return false; \
+        }
+
     LOAD_PROC(PFNGLCREATESHADERPROC, glCreateShader);
     LOAD_PROC(PFNGLSHADERSOURCEPROC, glShaderSource);
     LOAD_PROC(PFNGLCOMPILESHADERPROC, glCompileShader);
@@ -273,9 +293,13 @@ inline bool load_gl_functions() {
     
     LOAD_PROC(PFNGLUNIFORM1UIPROC, glUniform1ui);
     LOAD_PROC(PFNGLBINDBUFFERBASEPROC, glBindBufferBase);
-    LOAD_PROC(PFNGLDISPATCHCOMPUTEPROC, glDispatchCompute);
-    LOAD_PROC(PFNGLMEMORYBARRIERPROC, glMemoryBarrier);
-    LOAD_PROC(PFNGLMULTIDRAWELEMENTSINDIRECTPROC, glMultiDrawElementsIndirect);
+    // Compute and indirect draw back GPU cluster culling only. Required, they made
+    // the engine refuse to run on any driver without compute - which includes the
+    // Intel HD 3000 this is developed on when it is driven through Wine, and every
+    // GL 4.2-era driver. Optional, that path simply turns itself off.
+    LOAD_PROC_OPTIONAL(PFNGLDISPATCHCOMPUTEPROC, glDispatchCompute);
+    LOAD_PROC_OPTIONAL(PFNGLMEMORYBARRIERPROC, glMemoryBarrier);
+    LOAD_PROC_OPTIONAL(PFNGLMULTIDRAWELEMENTSINDIRECTPROC, glMultiDrawElementsIndirect);
 
     LOAD_PROC(PFNGLENABLEVERTEXATTRIBARRAYPROC, glEnableVertexAttribArray);
     LOAD_PROC(PFNGLVERTEXATTRIBPOINTERPROC, glVertexAttribPointer);
@@ -298,10 +322,10 @@ inline bool load_gl_functions() {
 
 #ifdef _WIN32
     // See the note above: GL 1.2+ is not exported by opengl32.dll.
-    LOAD_PROC(PFNGLACTIVETEXTURELITHPROC, lithium_glActiveTexture);
-    LOAD_PROC(PFNGLDRAWBUFFERSLITHPROC, lithium_glDrawBuffers);
-    LOAD_PROC(PFNGLTEXIMAGE3DLITHPROC, lithium_glTexImage3D);
-    LOAD_PROC(PFNGLTEXSUBIMAGE3DLITHPROC, lithium_glTexSubImage3D);
+    LOAD_PROC_NAMED(PFNGLACTIVETEXTURELITHPROC, lithium_glActiveTexture, "glActiveTexture");
+    LOAD_PROC_NAMED(PFNGLDRAWBUFFERSLITHPROC, lithium_glDrawBuffers, "glDrawBuffers");
+    LOAD_PROC_NAMED(PFNGLTEXIMAGE3DLITHPROC, lithium_glTexImage3D, "glTexImage3D");
+    LOAD_PROC_NAMED(PFNGLTEXSUBIMAGE3DLITHPROC, lithium_glTexSubImage3D, "glTexSubImage3D");
 #endif
     LOAD_PROC(PFNGLGETPROGRAMBINARYPROC, glGetProgramBinary);
     LOAD_PROC(PFNGLPROGRAMBINARYPROC, glProgramBinary);
@@ -324,5 +348,7 @@ inline bool load_gl_functions() {
     LOAD_PROC(PFNGLGENERATEMIPMAPPROC, glGenerateMipmap);
 
     #undef LOAD_PROC
+    #undef LOAD_PROC_OPTIONAL
+    #undef LOAD_PROC_NAMED
     return true;
 }

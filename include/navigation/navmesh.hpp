@@ -78,7 +78,10 @@ public:
     // Nearest navigable point to `near`, searched outward up to max_distance
     // horizontally. This is how a destination clicked in mid-air, or a spawn point
     // hovering slightly above the floor, is turned into something reachable.
-    bool sample_position(const DVector3& near, float max_distance, DVector3& out_point) const;
+    // The parameter is `query` rather than `near` on purpose: <windows.h> defines
+    // `near` and `far` as macros, left over from segmented 16-bit addressing, so
+    // that name does not survive preprocessing on a Windows build.
+    bool sample_position(const DVector3& query, float max_distance, DVector3& out_point) const;
 
     // Whether an agent can walk straight between two points without leaving the
     // navigable surface. Used to straighten paths, and useful on its own for an AI

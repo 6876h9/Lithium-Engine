@@ -500,9 +500,9 @@ int NavMesh::nearest_node(const DVector3& position, float max_distance) const {
     return best;
 }
 
-bool NavMesh::sample_position(const DVector3& near, float max_distance, DVector3& out_point) const {
+bool NavMesh::sample_position(const DVector3& query, float max_distance, DVector3& out_point) const {
     std::lock_guard<std::mutex> lock(query_mutex);
-    const int node = nearest_node(near, max_distance);
+    const int node = nearest_node(query, max_distance);
     if (node < 0) return false;
 
     float x, z;

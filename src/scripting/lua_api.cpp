@@ -786,12 +786,15 @@ int l_agent_set_speed(lua_State* L) {
 
 // nav.sample(x, y, z [, max_distance]) - nearest point on the navmesh, or nil.
 int l_nav_sample(lua_State* L) {
-    const DVector3 near{ static_cast<double>(arg_float(L, 1)),
-                         static_cast<double>(arg_float(L, 2)),
-                         static_cast<double>(arg_float(L, 3)) };
+    // Not named "near": <windows.h> still defines `near` and `far` as macros, left
+    // over from segmented 16-bit addressing, so that identifier does not survive
+    // preprocessing on a Windows build.
+    const DVector3 query{ static_cast<double>(arg_float(L, 1)),
+                          static_cast<double>(arg_float(L, 2)),
+                          static_cast<double>(arg_float(L, 3)) };
     const float max_distance = lua_isnoneornil(L, 4) ? 4.0f : arg_float(L, 4);
     DVector3 result;
-    if (!NavMesh::get().sample_position(near, max_distance, result)) { lua_pushnil(L); return 1; }
+    if (!NavMesh::get().sample_position(query, max_distance, result)) { lua_pushnil(L); return 1; }
     lua_pushnumber(L, result.x);
     lua_pushnumber(L, result.y);
     lua_pushnumber(L, result.z);

@@ -38,3 +38,6 @@ thirdparty/
 *.png
 *.jpg
 *.hdr
+
+# Packaged game builds
+dist/
