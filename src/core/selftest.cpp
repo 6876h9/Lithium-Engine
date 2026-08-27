@@ -1,6 +1,8 @@
 #include "core/selftest.hpp"
 
 #include "core/engine.hpp"
+#include "core/asset_database.hpp"
+#include "core/scene_serializer.hpp"
 #include "world/actor.hpp"
 #include "world/editor_primitive_actor.hpp"
 #include "world/static_mesh_component.hpp"
@@ -8,6 +10,7 @@
 #include "world/joint_component.hpp"
 #include "world/nav_agent_component.hpp"
 #include "world/particle_emitter_component.hpp"
+#include "world/cpp_script_component.hpp"
 #include "world/ui_canvas_component.hpp"
 #include "world/terrain_component.hpp"
 #include "physics/physics_engine.hpp"
@@ -15,6 +18,8 @@
 #include "renderer/lightmapper.hpp"
 
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <sstream>
@@ -90,6 +95,217 @@ int run_selftest(Engine& engine) {
     actors.clear();
     build_test_room(actors);
     check(actors.size() == 5, "test room built");
+
+    // --- Scene references survive a rename ----------------------------------
+    // The end-to-end version of the asset-identity claim, through a real .lithium
+    // file rather than the database API. This is the failure the sidecars exist to
+    // prevent, so it is asserted on the actual save/load path a project uses.
+    section("Scene survives an asset rename");
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        const fs::path root = fs::temp_directory_path(ec) / "lithium_scene_rename_selftest";
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        const fs::path original = root / "Crate.mesh";
+        const fs::path renamed  = root / "Crate_Final.mesh";
+        { std::ofstream f(original); f << "placeholder"; }
+
+        AssetDatabase& db = AssetDatabase::get();
+        db.scan({ root.string() });
+        const std::string guid = db.guid_for_path(original.string());
+        check(!guid.empty(), "the referenced asset has an identity");
+
+        // A scene with one actor pointing at that mesh.
+        std::vector<std::shared_ptr<Actor>> scene_actors;
+        {
+            auto a = std::make_shared<Actor>("Crate");
+            a->shape_type = "StaticMesh";
+            a->mesh_path = AssetDatabase::normalize_path(original.string());
+            scene_actors.push_back(a);
+        }
+
+        const fs::path scene_file = root / "level.lithium";
+        SceneSerializer::save_scene(scene_file.string(), scene_actors);
+        check(fs::exists(scene_file, ec), "scene saved");
+
+        // The saved file must carry both halves.
+        {
+            std::ifstream in(scene_file);
+            nlohmann::json scene_json;
+            in >> scene_json;
+            bool found_guid = false;
+            for (const auto& actor_json : scene_json["actors"]) {
+                if (actor_json.contains("mesh_guid") &&
+                    actor_json["mesh_guid"] == guid) { found_guid = true; break; }
+            }
+            check(found_guid, "the saved scene stores the mesh GUID alongside its path");
+        }
+
+        // Rename the asset, sidecar and all, exactly as a person reorganising a
+        // content folder would.
+        fs::rename(original, renamed, ec);
+        fs::rename(fs::path(original.string() + ".meta"),
+                   fs::path(renamed.string() + ".meta"), ec);
+        check(!ec, "asset and its sidecar renamed");
+        check(!fs::exists(original, ec), "the old path is genuinely gone");
+        db.scan({ root.string() });
+
+        std::vector<std::shared_ptr<Actor>> loaded;
+        SceneSerializer::load_scene(scene_file.string(), loaded);
+        check(loaded.size() == 1, "scene reloaded");
+        if (loaded.size() == 1) {
+            const std::string expected = AssetDatabase::normalize_path(renamed.string());
+            check(loaded[0]->mesh_path == expected,
+                  "the actor now points at the renamed asset");
+            // Before the sidecars this is exactly what happened instead.
+            check(loaded[0]->mesh_path != AssetDatabase::normalize_path(original.string()),
+                  "and not at the path that no longer exists");
+        }
+
+        fs::remove_all(root, ec);
+    }
+
+    // --- Native C++ scripting ----------------------------------------------
+    // An exported game must not need a compiler on the player's machine. That
+    // depends on two things holding: a script can be built to a module ahead of
+    // time, and the runtime prefers that module over invoking the compiler. Both
+    // are asserted here, because a break in either only shows up on someone else's
+    // machine where there is no toolchain to fall back on.
+    section("Native C++ scripting");
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        const fs::path root = fs::temp_directory_path(ec) / "lithium_script_selftest";
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        const fs::path source = root / "SelfTestScript.cpp";
+        {
+            std::ofstream f(source);
+            f << "#include \"world/actor.hpp\"\n"
+              << "extern \"C\" {\n"
+              << "void on_begin_play(Actor* self) { (void)self; }\n"
+              << "void on_tick(Actor* self, float dt) {\n"
+              << "    self->get_actor_transform().rotation.y += dt;\n"
+              << "}\n"
+              << "}\n";
+        }
+
+        const std::string module_name = CppScriptComponent::module_name_for(source.string());
+        check(module_name.find("SelfTestScript") == 0, "module name derives from the script name");
+
+        const fs::path module_path = root / module_name;
+        std::string log;
+        const bool built = CppScriptComponent::compile_script(source.string(), module_path.string(), log);
+
+        if (!built && log.find("No C++ compiler") != std::string::npos) {
+            // No toolchain on this machine. That is exactly the situation an
+            // exported game is in, and it is not a failure of the engine.
+            std::cout << "  [skip] no C++ compiler present; ahead-of-time build not exercised"
+                      << std::endl;
+        } else {
+            check(built, "a script compiles ahead of time to a loadable module");
+            if (!built) std::cout << log << std::endl;
+            check(fs::exists(module_path, ec), "the module lands where export would put it");
+
+            // The runtime looks for modules under kModuleDir relative to the working
+            // directory, which is what an exported game's layout provides.
+            const fs::path shipped_dir = fs::path(CppScriptComponent::kModuleDir);
+            fs::create_directories(shipped_dir, ec);
+            const fs::path shipped = shipped_dir / module_name;
+            fs::copy_file(module_path, shipped, fs::copy_options::overwrite_existing, ec);
+            check(!ec, "module staged into the shipped Scripts directory");
+
+            // Point a component at a source path that does NOT exist, so the only way
+            // it can come up is via the precompiled module. That is precisely the
+            // exported-game case: the .cpp is not shipped, only the module is.
+            const fs::path absent_source = root / "SelfTestScript.cpp";
+            fs::remove(absent_source, ec);
+
+            Actor probe("ScriptProbe");
+            auto* script = probe.create_component<CppScriptComponent>("Script", absent_source.string());
+            check(script != nullptr, "script component constructed");
+            if (script) {
+                check(!script->has_error,
+                      "a shipped module loads with no source and no compiler invocation");
+
+                const float before = probe.get_actor_transform().rotation.y;
+                script->tick(0.5f);
+                check(probe.get_actor_transform().rotation.y > before,
+                      "its on_tick actually runs and mutates the actor");
+            }
+
+            fs::remove(shipped, ec);
+            fs::remove_all(shipped_dir, ec);
+        }
+
+        fs::remove_all(root, ec);
+    }
+
+    // --- Asset identity ----------------------------------------------------
+    // The whole point of the GUID sidecars is that a reference survives the file
+    // being renamed. That is the case that used to break scenes silently, so it is
+    // the case asserted here - against real files on disk, not a mocked map.
+    section("Asset database");
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+
+        const fs::path root = fs::temp_directory_path(ec) / "lithium_assetdb_selftest";
+        fs::remove_all(root, ec);
+        fs::create_directories(root, ec);
+
+        const fs::path original = root / "Prop.mesh";
+        const fs::path renamed  = root / "Prop_Renamed.mesh";
+        { std::ofstream f(original); f << "not a real mesh"; }
+
+        AssetDatabase& db = AssetDatabase::get();
+        db.scan({ root.string() });
+
+        const std::string guid = db.guid_for_path(original.string());
+        check(guid.size() == 32, "an asset is assigned a 32-character GUID");
+        check(fs::exists(original.string() + ".meta", ec), "a .meta sidecar is written beside it");
+
+        // A scene saves both halves; this is what that JSON looks like.
+        nlohmann::json ref;
+        db.write_ref(ref, "mesh_path", original.string());
+        check(ref.contains("mesh_guid"), "write_ref stores the GUID alongside the path");
+
+        // Now do the thing that used to lose the reference.
+        fs::rename(original, renamed, ec);
+        check(!ec, "asset renamed on disk");
+        fs::rename(fs::path(original.string() + ".meta"),
+                   fs::path(renamed.string() + ".meta"), ec);
+        db.scan({ root.string() });
+
+        check(db.path_for_guid(guid) == AssetDatabase::normalize_path(renamed.string()),
+              "the GUID now resolves to the new path");
+
+        const std::string resolved = db.read_ref(ref, "mesh_path");
+        check(resolved == AssetDatabase::normalize_path(renamed.string()),
+              "a scene reference written before the rename still resolves");
+        check(resolved != original.string(), "and no longer points at the old path");
+
+        // A scene written before any of this existed has a path and no GUID. It has
+        // to keep loading exactly as it did.
+        nlohmann::json legacy;
+        legacy["mesh_path"] = "Content/Legacy.mesh";
+        check(db.read_ref(legacy, "mesh_path") == "Content/Legacy.mesh",
+              "a GUID-less legacy reference falls back to its path");
+
+        // An unknown GUID must not resolve to something arbitrary.
+        nlohmann::json dangling;
+        dangling["mesh_path"] = "Content/Gone.mesh";
+        dangling["mesh_guid"] = std::string(32, 'a');
+        check(db.read_ref(dangling, "mesh_path") == "Content/Gone.mesh",
+              "an unresolvable GUID falls back rather than inventing a path");
+
+        fs::remove_all(root, ec);
+    }
 
     // --- Collision layers --------------------------------------------------
     section("Collision layers");

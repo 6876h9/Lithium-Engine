@@ -1,6 +1,6 @@
 # Lithium Engine
 
-A powerful, high-performance custom game engine built in C++. It features an interactive editor, advanced rendering (OpenGL & Vulkan stubs), Native C++ Scripting, C-Minus visual scripting, physics, audio, and more.
+A custom game engine built in C++20. It features an interactive editor, a deferred PBR renderer (OpenGL 4.5), an offline path tracer, Jolt physics, three scripting paths (Lua, C-Minus visual scripting, and native C++), audio, navigation, and more.
 
 ## Getting Started
 
@@ -19,9 +19,14 @@ The portable version is distributed as an AppImage. This means it contains all t
      `./Lithium_Engine-x86_64.AppImage`
 
 ### Command-Line Options
-You can force the engine to start with a specific graphics API by launching it from the terminal with the following flags:
-- `./Lithium_Engine-x86_64.AppImage --opengl` : Forces the OpenGL Renderer (Default)
-- `./Lithium_Engine-x86_64.AppImage --vulkan` : Forces the Vulkan Renderer
+- `--selftest` : Runs the headless subsystem checks and exits with the failure count.
+- `--index-assets <dirs...>` : Mints the `.meta` GUID sidecars for a content tree and
+  exits. Run this after adding assets, and commit the sidecars - they are what lets a
+  scene keep its references when you rename or move a file. Defaults to
+  `Content EngineContent`.
+
+The renderer targets the OpenGL 4.5 core profile. There is no second backend; see
+`docs/Engine_Limitations.md`.
 
 ## Building from Source
 

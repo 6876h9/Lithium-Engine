@@ -1,4 +1,5 @@
 #include "core/engine.hpp"
+#include "core/asset_database.hpp"
 #include <typeinfo>
 #include <cstring>
 #include <cstdint>
@@ -315,6 +316,13 @@ bool Engine::initialize_runtime() {
     }
     float t_renderer_done = SDL_GetTicks() / 1000.0f;
 
+    pump_loading("Indexing assets");
+    // Builds the GUID index before anything loads a scene, because scene loading is
+    // what consumes it. Content/ is the project's own assets and EngineContent/ the
+    // ones shipped with the editor; both can be referenced from a scene, so both
+    // need stable identities.
+    AssetDatabase::get().scan({ "Content", "EngineContent" });
+
     pump_loading("Starting resource manager");
     ResourceManager::get().initialize(4); // 4 threads for asset loading
     pump_loading("Starting audio and physics");
@@ -381,47 +389,6 @@ void Engine::run() {
     float last_time = SDL_GetTicks() / 1000.0f;
 
     while (is_running) {
-        if (pending_api_swap != RHI::BackendAPI::None) {
-            std::cout << "Runtime API Swap Requested..." << std::endl;
-            // Signal logic thread to stop temporarily
-            bool was_running = is_running;
-            is_running = false;
-            swap_cv.notify_all();
-            if (logic_thread.joinable()) {
-                logic_thread.join();
-            }
-
-            // Invalidate GPU resources so they re-upload on the new context
-            ResourceManager::get().invalidate_gpu_resources();
-
-            // Destroy current context
-            window->shutdown();
-            
-            // Re-initialize with new API
-            RHI::RendererAPI::current_api = pending_api_swap.load();
-            window->initialize();
-            renderer->initialize(window->get_width(), window->get_height());
-            window->init_imgui();
-
-            // Save new config
-            std::string config_path = "engine_config.json";
-            nlohmann::json config_json;
-            if (std::filesystem::exists(config_path)) {
-                std::ifstream config_file(config_path);
-                config_file >> config_json;
-            }
-            config_json["graphics_api"] = (RHI::RendererAPI::current_api == RHI::BackendAPI::Vulkan) ? "vulkan" : "opengl";
-            std::ofstream out_file(config_path);
-            out_file << config_json.dump(4);
-
-            // Restart logic thread
-            is_running = was_running;
-            pending_api_swap = RHI::BackendAPI::None;
-            if (is_running) {
-                logic_thread = std::thread(&Engine::logic_loop, this);
-            }
-        }
-
         process_input();
 
         // Sampled once per frame and before scripts run, so every script in the frame

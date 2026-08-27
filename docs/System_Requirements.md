@@ -69,9 +69,15 @@ high-end CPU meaningfully cuts load time.
 
 ### If a Vulkan backend lands
 
-The renderer is structured behind an RHI abstraction (`RHI::RendererAPI`) with a
-Vulkan enum already present, and the GI mode enum reserves a hardware-RT tier. Neither
-is implemented. **Treat these as future tiers, not shipping features.**
+It would be new work, not a switch to flip. An `RHI::RendererAPI` abstraction and a
+stubbed Vulkan backend used to exist here; both were removed because `renderer.cpp`
+never referenced them once, and selecting *Vulkan* in the editor destroyed the GL
+context and rebuilt an identical one while writing `graphics_api: vulkan` into the
+config. An abstraction that has only ever had one implementation does not describe
+what a second would need.
+
+The GI mode enum does still reserve a hardware-RT tier, which is likewise
+unimplemented. **Treat it as a future tier, not a shipping feature.**
 
 ---
 

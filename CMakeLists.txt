@@ -77,6 +77,7 @@ set(SOURCES
     src/core/noise.cpp
     src/core/model_importer.cpp
     src/core/mesh_simplifier.cpp
+    src/core/asset_database.cpp
     src/core/scene_serializer.cpp
     src/core/selftest.cpp
     src/core/visual_script_editor.cpp
@@ -84,9 +85,6 @@ set(SOURCES
     src/renderer/tesla.cpp
     src/renderer/material_shader.cpp
     src/renderer/lightmapper.cpp
-    src/renderer/rhi/renderer_api.cpp
-    src/renderer/rhi/opengl/opengl_renderer_api.cpp
-    src/renderer/rhi/vulkan/vulkan_renderer_api.cpp
     src/world/actor.cpp
     src/world/component.cpp
     src/world/static_mesh_component.cpp
@@ -194,6 +192,14 @@ FetchContent_Declare(
     SOURCE_SUBDIR  "Build"
 )
 FetchContent_MakeAvailable(JoltPhysics)
+
+# Jolt compiles itself with -Werror. Jolt v5.0.0 predates GCC's current
+# -Wmaybe-uninitialized analysis, which now fires inside SoftBodyMotionProperties
+# and turns a third-party warning into a failed build of this engine. Downgrade
+# -Werror for Jolt's own target only - warnings on engine code stay fatal.
+if (TARGET Jolt AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(Jolt PRIVATE -Wno-error)
+endif()
 
 # Fetch Lua (gameplay scripting)
 #
@@ -326,7 +332,36 @@ endif()
 # a stray "rm") without any source change, a normal `cmake --build` would
 # silently skip restoring them. An ALL custom target with no OUTPUT re-runs
 # copy_if_different on every build invocation regardless.
+# Assets copied individually rather than by copy_directory. Each one's .meta
+# sidecar has to travel with it: the GUIDs are authored against the source tree by
+# `Lithium_Engine --index-assets` and committed, and if the build output did not
+# inherit them the engine would mint fresh ones there on first run. Every clean
+# build would then issue different GUIDs and every scene reference would break -
+# the precise failure the sidecars exist to prevent. Directories copied whole
+# already carry their sidecars, so they are not listed here.
+set(LITHIUM_INDIVIDUAL_ASSETS
+    Content/DamagedHelmet.mesh
+    Content/Sofa_01.bin
+    Content/Sofa_01.gltf
+    Content/Textures/DamagedHelmet_embedded0.jpg
+    Content/Textures/WoodFloor.jpg
+    EngineContent/DefaultSky.hdr
+    EngineContent/NightSky.hdr
+)
+
 foreach(target Lithium_Engine Lithium_Game)
+    # One copy_if_exists invocation per sidecar, tolerating the ones a fresh
+    # checkout has not indexed yet.
+    set(${target}_meta_commands "")
+    foreach(asset ${LITHIUM_INDIVIDUAL_ASSETS})
+        list(APPEND ${target}_meta_commands
+            COMMAND ${CMAKE_COMMAND}
+                -DSRC=${CMAKE_CURRENT_SOURCE_DIR}/${asset}.meta
+                -DDST=$<TARGET_FILE_DIR:${target}>/${asset}.meta
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/copy_if_exists.cmake
+        )
+    endforeach()
+
     add_custom_target(${target}_content ALL
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/EngineContent"
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/Content/Textures"
@@ -374,6 +409,7 @@ foreach(target Lithium_Engine Lithium_Game)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             ${LITHIUM_RUNTIME_LIBS}
             "$<TARGET_FILE_DIR:${target}>${LITHIUM_RUNTIME_LIB_SUBDIR}"
+        ${${target}_meta_commands}
         DEPENDS ${target}
     )
 endforeach()

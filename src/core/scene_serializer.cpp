@@ -1,4 +1,5 @@
 #include "core/scene_serializer.hpp"
+#include "core/asset_database.hpp"
 #include <nlohmann/json.hpp>
 #include <cctype>
 #include <filesystem>
@@ -56,7 +57,7 @@ json widget_to_json(const UIWidget& w) {
     j["v_align"] = w.v_align;
     j["word_wrap"] = w.word_wrap;
     j["padding"] = w.padding;
-    j["image_path"] = w.image_path;
+    AssetDatabase::get().write_ref(j, "image_path", w.image_path);
     j["image_tint"] = { w.image_tint.x, w.image_tint.y, w.image_tint.z, w.image_tint.w };
     j["hover_color"] = { w.hover_color.x, w.hover_color.y, w.hover_color.z, w.hover_color.w };
     j["pressed_color"] = { w.pressed_color.x, w.pressed_color.y, w.pressed_color.z, w.pressed_color.w };
@@ -107,7 +108,7 @@ std::unique_ptr<UIWidget> widget_from_json(const json& j) {
     w->v_align = j.value("v_align", w->v_align);
     w->word_wrap = j.value("word_wrap", w->word_wrap);
     w->padding = j.value("padding", w->padding);
-    w->image_path = j.value("image_path", std::string());
+    w->image_path = AssetDatabase::get().read_ref(j, "image_path");
     if (j.contains("image_tint")) w->image_tint = vec4_from(j["image_tint"], w->image_tint);
     if (j.contains("hover_color")) w->hover_color = vec4_from(j["hover_color"], w->hover_color);
     if (j.contains("pressed_color")) w->pressed_color = vec4_from(j["pressed_color"], w->pressed_color);
@@ -134,8 +135,8 @@ json actor_to_json(Actor* actor) {
         json actor_json;
         actor_json["name"] = actor->get_name();
         actor_json["shape_type"] = actor->shape_type;
-        actor_json["mesh_path"] = actor->mesh_path;
-        actor_json["material_path"] = actor->material_path;
+        AssetDatabase::get().write_ref(actor_json, "mesh_path", actor->mesh_path);
+        AssetDatabase::get().write_ref(actor_json, "material_path", actor->material_path);
         actor_json["is_invisible"] = actor->is_invisible;
         actor_json["actor_color"] = { actor->actor_color.x, actor->actor_color.y, actor->actor_color.z };
         actor_json["metallic"] = actor->metallic;
@@ -314,6 +315,8 @@ json actor_to_json(Actor* actor) {
                 {"sub_emitter_trigger", emitter->sub_emitter_trigger},
                 {"sub_emitter_count", emitter->sub_emitter_count}
             };
+            AssetDatabase::get().write_ref(actor_json["particle_emitter"], "texture_path",
+                                           emitter->texture_path);
         }
 
         if (auto audio = actor->get_component<AudioComponent>()) {
@@ -333,6 +336,8 @@ json actor_to_json(Actor* actor) {
                 {"cone_outer_angle", audio->cone_outer_angle},
                 {"cone_outer_gain", audio->cone_outer_gain}
             };
+            AssetDatabase::get().write_ref(actor_json["audio"], "file_path",
+                                           audio->get_file_path());
         }
 
         if (auto terrain = actor->get_component<TerrainComponent>()) {
@@ -369,6 +374,13 @@ json actor_to_json(Actor* actor) {
                 {"foliage_max_slope_degrees", terrain->foliage_max_slope_degrees},
                 {"foliage_max_instances", terrain->foliage_max_instances}
             };
+            AssetDatabase::get().write_ref(actor_json["terrain"], "data_path", terrain->data_path);
+            AssetDatabase::get().write_ref(actor_json["terrain"], "foliage_mesh_path",
+                                           terrain->foliage_mesh_path);
+            for (int layer = 0; layer < TerrainComponent::kLayerCount; ++layer) {
+                AssetDatabase::get().write_ref(actor_json["terrain"]["layers"][layer], "texture",
+                                               terrain->layer_texture_path[layer]);
+            }
         }
 
         if (auto agent = actor->get_component<NavAgentComponent>()) {
@@ -394,6 +406,10 @@ json actor_to_json(Actor* actor) {
                 {"cull_screen_height", lod->cull_screen_height},
                 {"levels", levels}
             };
+            for (size_t i = 0; i < lod->levels.size(); ++i) {
+                AssetDatabase::get().write_ref(actor_json["lod_group"]["levels"][i], "mesh_path",
+                                               lod->levels[i].mesh_path);
+            }
         }
 
         // UI canvases, as an array for the same reason joints are: a pause menu and
@@ -518,7 +534,9 @@ void SceneSerializer::save_scene(const std::string& filepath, const std::vector<
     // lit by a night sky and one lit by midday sun are different levels, and until
     // now reloading either gave you whatever HDRI happened to be resident.
     if (g_engine) {
-        scene_json["environment"] = { {"hdri", g_engine->get_renderer().env_map_path} };
+        scene_json["environment"] = json::object();
+        AssetDatabase::get().write_ref(scene_json["environment"], "hdri",
+                                       g_engine->get_renderer().env_map_path);
     }
 
     // Baked lighting goes to a sidecar named after the scene. It is megabytes of
@@ -546,7 +564,7 @@ std::shared_ptr<Actor> actor_from_json(const json& actor_json) {
     {
         std::string name = actor_json["name"];
         std::string shape_type = actor_json["shape_type"];
-        std::string mesh_path = actor_json.value("mesh_path", "");
+        std::string mesh_path = AssetDatabase::get().read_ref(actor_json, "mesh_path");
 
         std::shared_ptr<Actor> new_actor;
 
@@ -577,7 +595,7 @@ std::shared_ptr<Actor> actor_from_json(const json& actor_json) {
         }
 
         // Restore properties
-        new_actor->material_path = actor_json.value("material_path", "");
+        new_actor->material_path = AssetDatabase::get().read_ref(actor_json, "material_path");
         new_actor->is_invisible = actor_json.value("is_invisible", false);
         
         auto color_arr = actor_json["actor_color"];
@@ -726,7 +744,7 @@ std::shared_ptr<Actor> actor_from_json(const json& actor_json) {
                 emitter->acceleration = { p_json["acceleration"][0], p_json["acceleration"][1], p_json["acceleration"][2] };
             }
             emitter->blend_mode = p_json.value("blend_mode", 0);
-            emitter->texture_path = p_json.value("texture_path", std::string());
+            emitter->texture_path = AssetDatabase::get().read_ref(p_json, "texture_path");
             emitter->intensity = p_json.value("intensity", 2.0f);
             emitter->collision_enabled = p_json.value("collision_enabled", false);
             emitter->collision_bounce = p_json.value("collision_bounce", 0.35f);
@@ -755,7 +773,7 @@ std::shared_ptr<Actor> actor_from_json(const json& actor_json) {
             audio->set_spatial(a_json.value("spatial", true));
             audio->set_volume(a_json.value("volume", 1.0f));
             audio->set_pitch(a_json.value("pitch", 1.0f));
-            audio->set_file_path(a_json.value("file_path", std::string()));
+            audio->set_file_path(AssetDatabase::get().read_ref(a_json, "file_path"));
         }
 
         if (actor_json.contains("terrain")) {
@@ -766,14 +784,15 @@ std::shared_ptr<Actor> actor_from_json(const json& actor_json) {
             // must still leave a terrain of the right size rather than the default.
             terrain->resize(t_json.value("resolution", 128), t_json.value("world_size", 200.0f));
 
-            terrain->data_path = t_json.value("data_path", std::string());
+            terrain->data_path = AssetDatabase::get().read_ref(t_json, "data_path");
             if (!terrain->data_path.empty()) terrain->load_data(terrain->data_path);
 
             if (t_json.contains("layers")) {
                 int layer = 0;
                 for (const auto& layer_json : t_json["layers"]) {
                     if (layer >= TerrainComponent::kLayerCount) break;
-                    terrain->layer_texture_path[layer] = layer_json.value("texture", std::string());
+                    terrain->layer_texture_path[layer] =
+                        AssetDatabase::get().read_ref(layer_json, "texture");
                     terrain->layer_tiling[layer] = layer_json.value("tiling", 40.0f);
                     ++layer;
                 }
@@ -781,7 +800,7 @@ std::shared_ptr<Actor> actor_from_json(const json& actor_json) {
             terrain->metallic = t_json.value("metallic", 0.0f);
             terrain->collision_layer = t_json.value("collision_layer", 0);
             terrain->roughness = t_json.value("roughness", 0.85f);
-            terrain->foliage_mesh_path = t_json.value("foliage_mesh_path", std::string());
+            terrain->foliage_mesh_path = AssetDatabase::get().read_ref(t_json, "foliage_mesh_path");
             terrain->foliage_density = t_json.value("foliage_density", 0.6f);
             terrain->foliage_min_scale = t_json.value("foliage_min_scale", 0.8f);
             terrain->foliage_max_scale = t_json.value("foliage_max_scale", 1.4f);
@@ -810,7 +829,7 @@ std::shared_ptr<Actor> actor_from_json(const json& actor_json) {
             if (l_json.contains("levels")) {
                 for (const auto& level_json : l_json["levels"]) {
                     LODGroupComponent::LODLevel level;
-                    level.mesh_path = level_json.value("mesh_path", std::string());
+                    level.mesh_path = AssetDatabase::get().read_ref(level_json, "mesh_path");
                     level.screen_height = level_json.value("screen_height", 0.25f);
                     lod->levels.push_back(level);
                 }
@@ -915,7 +934,7 @@ bool SceneSerializer::load_scene(const std::string& filepath, std::vector<std::s
     file.close();
 
     if (scene_json.contains("environment") && g_engine) {
-        std::string hdri = scene_json["environment"].value("hdri", std::string());
+        std::string hdri = AssetDatabase::get().read_ref(scene_json["environment"], "hdri");
         if (hdri.empty()) {
             g_engine->get_renderer().clear_environment_map();
         } else {
