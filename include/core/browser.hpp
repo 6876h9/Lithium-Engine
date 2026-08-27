@@ -35,6 +35,8 @@ struct EngineConfig {
     float master_volume = 1.0f;
     bool enable_ssr = true;
     bool enable_bloom = true;
+    // Strength of ambient occlusion on indirect light. 1 is full effect.
+    float ssao_strength = 1.0f;
     bool enable_taa_option = true;
     float field_of_view = 45.0f;
     // Chosen environment map, relative to the executable. Empty means the bundled

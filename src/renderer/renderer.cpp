@@ -353,6 +353,16 @@ bool Renderer::initialize(int width, int height) {
         uniform sampler2D gAlbedoSpec;
         uniform sampler2D gPBR;
         uniform sampler2D gBakedGI;
+        // Ambient occlusion from render_ssao(). This is the *previous* frame's
+        // result: the SSGI half of that pass samples the lit scene colour, so it
+        // cannot run before lighting, and AO is low-frequency and temporally stable
+        // enough that a frame of lag is not visible. The renderer already makes the
+        // same trade for occlusion queries.
+        uniform sampler2D uSSAOMap;
+        // False until render_ssao() has produced a result, so the first frame after
+        // a resize does not multiply ambient by an empty buffer and go black.
+        uniform bool uHasSSAO;
+        uniform float uSSAOStrength;
         uniform sampler2D shadowMap;
         uniform sampler2D uEnvironmentMap;
         uniform sampler2D uIrradianceMap;
@@ -758,15 +768,34 @@ bool Renderer::initialize(int width, int height) {
             float bounceAmount = max(dot(N, vec3(0.0, -1.0, 0.0)), 0.0); // Surface facing down
             vec3 gi = bounceColor * bounceAmount * bounceMix * (1.0 - metallic);
 
-            // Attenuate ambient by shadow to ground objects (Ambient Occlusion approximation)
+            // Ambient occlusion, applied to indirect light only.
+            //
+            // This used to be a whole-image multiply in the post pass, which scaled
+            // direct sunlight by AO as well. Direct light is not occluded by the
+            // ambient visibility term - the shadow map already answers that - so
+            // darkening it too compressed lit surfaces and creases toward each
+            // other and read as flat. Here it attenuates exactly what it describes:
+            // the hemisphere of incoming indirect light.
+            float ssao = uHasSSAO
+                ? mix(1.0, texture(uSSAOMap, TexCoords).a, clamp(uSSAOStrength, 0.0, 1.0))
+                : 1.0;
+
+            // The shadow term darkens ambient as a coarse stand-in for "this point
+            // cannot see much of the sky". It is kept, but no longer has to carry
+            // the contact detail SSAO now supplies.
             float occlusion = mix(1.0, 0.2, main_shadow);
-            vec3 ambient = (diffuseAmbient + specularAmbient + gi) * occlusion;
+            vec3 ambient = (diffuseAmbient + specularAmbient + gi) * occlusion * ssao;
 
             // Baked indirect light, added rather than attenuated by the shadow term:
             // it already accounts for occlusion - that is what the bake solved - and
             // darkening it again would double-count every shadowed surface.
+            //
+            // SSAO still applies, because it is not the same quantity: a lightmap is
+            // baked at a texel density far too coarse to capture the darkening where
+            // two surfaces actually meet, and that contact detail is most of what
+            // makes a scene read as grounded rather than pasted together.
             vec3 bakedIndirect = texture(gBakedGI, TexCoords).rgb;
-            ambient += bakedIndirect * albedo * (1.0 - metallic);
+            ambient += bakedIndirect * albedo * (1.0 - metallic) * ssao;
 
             if (uEnableRayTracing) {
                 float fake_ao = uNumLights > 0 ? clamp(dot(N, normalize(-uLights[0].direction)) * 0.5 + 0.5, 0.0, 1.0) : 1.0;
@@ -944,6 +973,7 @@ bool Renderer::initialize(int width, int height) {
     glUniform1i(glGetUniformLocation(lighting_shader_program, "uEnvironmentMap"), 5);
     glUniform1i(glGetUniformLocation(lighting_shader_program, "uIrradianceMap"), 6);
     glUniform1i(glGetUniformLocation(lighting_shader_program, "uPrefilteredEnv"), 7);
+    glUniform1i(glGetUniformLocation(lighting_shader_program, "uSSAOMap"), 8);
     glUseProgram(0);
 
     // Depth Shader
@@ -1142,8 +1172,12 @@ bool Renderer::initialize(int width, int height) {
                 dbgAO = ao;
                 dbgSSGI = ssgi;
 
-                // Blend SSGI and AO
-                finalColor = finalColor * mix(1.0, ao, 0.6) + ssgi * 0.35;
+                // AO is applied in the lighting pass now, against the indirect term
+                // alone. Re-applying it here would darken direct light and double the
+                // occlusion on ambient - which is what made the image look flat.
+                // Only the screen-space bounce is composited here, because it is
+                // additive indirect light rather than an occlusion factor.
+                finalColor += ssgi * 0.35;
                 
                 // Screen Space Reflections (SSR)
                 float smoothness = texture(screenTexture, TexCoords).a;
@@ -3558,6 +3592,10 @@ void Renderer::render_ssao() {
 
     glDrawArrays(GL_TRIANGLES, 0, 6);
 
+    // From here the blur target holds a real result, so the next frame's lighting
+    // pass may use it.
+    ssao_history_valid = true;
+
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glViewport(0, 0, fbo_width, fbo_height);
 }
@@ -4014,6 +4052,7 @@ void Renderer::create_fbo(int width, int height) {
     if (ssao_fbo) { glDeleteFramebuffers(1, &ssao_fbo); glDeleteTextures(1, &ssao_texture); }
     if (ssao_blur_fbo) { glDeleteFramebuffers(1, &ssao_blur_fbo); glDeleteTextures(1, &ssao_blur_texture); }
     unsigned int* ssao_fbos[2] = { &ssao_fbo, &ssao_blur_fbo };
+    ssao_history_valid = false;
     unsigned int* ssao_texes[2] = { &ssao_texture, &ssao_blur_texture };
     for (int i = 0; i < 2; ++i) {
         glGenFramebuffers(1, ssao_fbos[i]);
@@ -4135,6 +4174,10 @@ void Renderer::unbind_fbo() {
     glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, env_map_texture);
     glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, env_irradiance_texture);
     glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, env_prefiltered_texture);
+    glActiveTexture(GL_TEXTURE8); glBindTexture(GL_TEXTURE_2D, ssao_blur_texture);
+    glUniform1i(glGetUniformLocation(lighting_shader_program, "uHasSSAO"),
+                (ssao_history_valid && ssao_blur_texture != 0) ? 1 : 0);
+    glUniform1f(glGetUniformLocation(lighting_shader_program, "uSSAOStrength"), ssao_strength);
     // Unit 12: baked indirect light from the lightmap atlas or the probe grid,
     // whichever the geometry pass wrote for each pixel.
     glActiveTexture(GL_TEXTURE12); glBindTexture(GL_TEXTURE_2D, gBakedGI);

@@ -2447,6 +2447,7 @@ void Engine::load_engine_options() {
         if (j.contains("master_volume"))     c.master_volume     = j["master_volume"].get<float>();
         if (j.contains("enable_ssr"))        c.enable_ssr        = j["enable_ssr"].get<bool>();
         if (j.contains("enable_bloom"))      c.enable_bloom      = j["enable_bloom"].get<bool>();
+        if (j.contains("ssao_strength"))     c.ssao_strength     = j["ssao_strength"].get<float>();
         if (j.contains("enable_taa"))        c.enable_taa_option = j["enable_taa"].get<bool>();
         if (j.contains("field_of_view"))     c.field_of_view     = j["field_of_view"].get<float>();
         if (j.contains("sky_hdri"))         c.sky_hdri          = j["sky_hdri"].get<std::string>();
@@ -2503,6 +2504,7 @@ void Engine::save_engine_options() {
         j["master_volume"]     = c.master_volume;
         j["enable_ssr"]        = c.enable_ssr;
         j["enable_bloom"]      = c.enable_bloom;
+        j["ssao_strength"]     = c.ssao_strength;
         j["enable_taa"]        = c.enable_taa_option;
         j["field_of_view"]     = c.field_of_view;
         j["sky_hdri"]          = c.sky_hdri;
@@ -2693,6 +2695,7 @@ void Engine::apply_engine_options() {
         renderer->load_environment_map(active_config.sky_hdri);
     }
     if (renderer) renderer->enable_ssr = active_config.enable_ssr;
+    if (renderer) renderer->ssao_strength = active_config.ssao_strength;
     // The main menu's Options tab calls this before the heavy subsystems exist, so
     // the miniaudio engine may not be initialised yet; it picks the volume up in
     // initialize_runtime() instead.
@@ -2790,6 +2793,11 @@ void Engine::draw_main_menu() {
             ImGui::Separator();
             if (ImGui::Checkbox("Screen Space Reflections (SSR)", &c.enable_ssr)) dirty = true;
             if (ImGui::Checkbox("Bloom", &c.enable_bloom)) dirty = true;
+            if (ImGui::SliderFloat("Ambient Occlusion", &c.ssao_strength, 0.0f, 1.0f, "%.2f")) dirty = true;
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("How much ambient occlusion darkens indirect light.\n"
+                                  "Direct sunlight is unaffected - the shadow map handles that.");
+            }
             if (ImGui::Checkbox("Temporal Anti-Aliasing (TAA)", &c.enable_taa_option)) dirty = true;
             if (ImGui::Checkbox("Ray Tracing / Path Tracing Simulation", &c.enable_raytracing)) dirty = true;
             if (ImGui::Checkbox("UE4 High-Fidelity Lighting", &c.enable_ue4_lighting)) dirty = true;

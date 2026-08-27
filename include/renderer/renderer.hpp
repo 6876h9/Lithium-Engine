@@ -555,6 +555,21 @@ private:
 
     unsigned int ssao_fbo = 0, ssao_texture = 0;
     unsigned int ssao_blur_fbo = 0, ssao_blur_texture = 0;
+    // The lighting pass consumes the previous frame's AO, so there is one frame
+    // after startup or a resize where ssao_blur_texture holds nothing. Ambient is
+    // left unoccluded until render_ssao() has actually written it, rather than
+    // multiplied by a cleared buffer.
+    bool ssao_history_valid = false;
+
+public:
+    // How strongly ambient occlusion darkens indirect light. 0 disables it, 1 lets a
+    // fully occluded point receive no ambient at all. Adjustable because AO strength
+    // is a look decision, not a correctness one - and because it now only touches
+    // indirect light, it can be pushed much harder than when it scaled the whole
+    // image without turning direct sunlight muddy.
+    float ssao_strength = 1.0f;
+
+private:
     unsigned int ssao_shader_program = 0;
     unsigned int ssao_blur_shader_program = 0;
     int ssao_width = 0, ssao_height = 0;
