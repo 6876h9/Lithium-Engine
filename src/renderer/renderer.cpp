@@ -1058,6 +1058,8 @@ bool Renderer::initialize(int width, int height) {
         uniform sampler2D uBloomMap;
         uniform sampler2D uPBRMap;      // gBuffer PBR: r = metallic, g = roughness
         uniform float uBloomIntensity;
+        // Viewer brightness control, multiplied into the auto-exposure result.
+        uniform float uExposureBias;
         uniform bool uEnableSSR;
         uniform vec2 texelStep;
         uniform mat4 uProj;
@@ -1258,7 +1260,7 @@ bool Renderer::initialize(int width, int height) {
             // just raises the exposure to compensate. This multiplier is the actual
             // control over how bright the image lands, and at 1.2 every scene was
             // pushed a fifth above middle grey and read as washed out.
-            float exposure = autoExposure * 0.82;
+            float exposure = autoExposure * 0.82 * uExposureBias;
             dbgPreExposure = finalColor;
             finalColor *= exposure;
             float A = 2.51; float B = 0.03; float C = 2.43; float D = 0.59; float E = 0.14;
@@ -3762,6 +3764,7 @@ void Renderer::resolve_fxaa() {
     glBindTexture(GL_TEXTURE_2D, bloom_texture[0]);
     glUniform1i(glGetUniformLocation(fxaa_shader_program, "uBloomMap"), 4);
     glUniform1f(glGetUniformLocation(fxaa_shader_program, "uBloomIntensity"), 0.9f);
+    glUniform1f(glGetUniformLocation(fxaa_shader_program, "uExposureBias"), exposure_bias);
     glUniform1i(glGetUniformLocation(fxaa_shader_program, "uEnableSSR"), enable_ssr ? 1 : 0);
 
     glActiveTexture(GL_TEXTURE5);

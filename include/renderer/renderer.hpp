@@ -569,6 +569,12 @@ public:
     // image without turning direct sunlight muddy.
     float ssao_strength = 1.0f;
 
+    // Multiplies the auto-exposure result. A deliberately dark scene can end up
+    // genuinely unplayable on a dim panel, and auto-exposure cannot help - it is
+    // already doing what it was asked. This is the viewer's own gamma knob, the one
+    // every horror game ships, rather than an attempt to second-guess the art.
+    float exposure_bias = 1.0f;
+
 private:
     unsigned int ssao_shader_program = 0;
     unsigned int ssao_blur_shader_program = 0;

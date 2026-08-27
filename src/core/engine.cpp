@@ -1,6 +1,7 @@
 #include "core/engine.hpp"
 #include "core/asset_database.hpp"
 #include <typeinfo>
+#include <set>
 #include <cstring>
 #include <cstdint>
 #include <cstdlib>
@@ -281,6 +282,10 @@ bool Engine::initialize(const std::string& initial_scene_path, bool standalone) 
             editor_ui.current_scene_path = initial_scene_path;
         }
         SceneSerializer::load_scene(initial_scene_path, actors);
+        // The scene's own HUD lines and sound list, so a script can say something and
+        // make a noise without either being compiled into the engine.
+        load_script_strings(initial_scene_path);
+        load_script_sounds(initial_scene_path);
     } else {
         // Straight to the main menu, with nothing heavy loaded yet. The browser's
         // launch button is what triggers initialize_runtime().
@@ -970,6 +975,17 @@ void Engine::process_input() {
 }
 
 void Engine::update(float delta_time) {
+    // Expire the script HUD message. Counted down here rather than in the draw call
+    // because the HUD only draws in play mode, and a message left with time on it
+    // would otherwise reappear when play resumed.
+    if (script_hud.message_seconds_left > 0.0f) {
+        script_hud.message_seconds_left -= delta_time;
+        if (script_hud.message_seconds_left <= 0.0f) {
+            script_hud.message_seconds_left = 0.0f;
+            script_hud.message_index = -1;
+        }
+    }
+
     // Editor flight movement, suppressed while the game is running for the same
     // reason as the look controls above.
     if (is_rmb_down && current_state != EngineState::PlayInEditor) {
@@ -2382,11 +2398,125 @@ void Engine::draw_ui_canvases() {
 // Drawn through the foreground draw list so it sits over the viewport in the editor
 // and over the fullscreen game image in a standalone build, without either needing
 // to know it exists.
+void Engine::load_script_strings(const std::string& scene_path) {
+    script_strings.clear();
+    if (scene_path.empty()) return;
+
+    // "<scene>.strings" - facility.lithium -> facility.lithium.strings. Sitting on
+    // the scene name rather than a fixed filename means two scenes in one folder
+    // keep separate tables.
+    const std::string table_path = scene_path + ".strings";
+    std::error_code ec;
+    if (!std::filesystem::exists(table_path, ec) || ec) return;
+
+    std::ifstream in(table_path);
+    if (!in.is_open()) {
+        std::cerr << "[Script] Could not open string table " << table_path << std::endl;
+        return;
+    }
+
+    std::string line;
+    while (std::getline(in, line)) {
+        // Tolerate CRLF, so a table edited on Windows does not put a stray carriage
+        // return through ImGui's text renderer.
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        script_strings.push_back(line);
+    }
+    std::cout << "[Script] Loaded " << script_strings.size() << " HUD lines from "
+              << table_path << std::endl;
+}
+
+void Engine::load_script_sounds(const std::string& scene_path) {
+    script_sounds.clear();
+    if (scene_path.empty()) return;
+
+    const std::string manifest = scene_path + ".sounds";
+    std::error_code ec;
+    if (!std::filesystem::exists(manifest, ec) || ec) return;
+
+    std::ifstream in(manifest);
+    if (!in.is_open()) {
+        std::cerr << "[Script] Could not open sound manifest " << manifest << std::endl;
+        return;
+    }
+
+    std::string line;
+    while (std::getline(in, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        // Blank entries are kept so indices stay stable when one is cleared; a blank
+        // simply plays nothing.
+        script_sounds.push_back(line);
+    }
+    std::cout << "[Script] Loaded " << script_sounds.size() << " sound entries from "
+              << manifest << std::endl;
+}
+
+void Engine::play_script_sound(int index, float volume) {
+    if (index < 0 || index >= static_cast<int>(script_sounds.size())) return;
+    if (!AudioEngine::get().initialized()) return;
+
+    const std::string& path = script_sounds[static_cast<size_t>(index)];
+    if (path.empty()) return;
+
+    std::error_code ec;
+    if (!std::filesystem::exists(path, ec) || ec) {
+        // Reported once per index rather than every call, or a sound fired each
+        // frame would bury the log it is trying to warn through.
+        static std::set<int> warned;
+        if (warned.insert(index).second) {
+            std::cerr << "[Script] Sound " << index << " not found: " << path << std::endl;
+        }
+        return;
+    }
+
+    ma_engine* eng = AudioEngine::get().get_engine();
+
+    // Per-shot volume needs a voice this owns. ma_engine_play_sound is the obvious
+    // fire-and-forget call, but it exposes no volume, and reaching for
+    // ma_engine_set_volume instead would set the *global* engine volume - silently
+    // overwriting the master volume slider for every other sound in the game.
+    //
+    // So voices are kept here and reaped once they finish. Finished ones are
+    // uninitialised on the next call rather than on a timer, which keeps this to
+    // exactly the work a script's own calls pay for.
+    for (auto it = script_voices.begin(); it != script_voices.end();) {
+        if (ma_sound_at_end(it->get())) {
+            ma_sound_uninit(it->get());
+            it = script_voices.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // A script in a loop can ask for a sound every frame. Past this many concurrent
+    // voices the oldest is stopped rather than letting the pool grow without bound.
+    constexpr size_t kMaxScriptVoices = 32;
+    if (script_voices.size() >= kMaxScriptVoices) {
+        ma_sound_uninit(script_voices.front().get());
+        script_voices.erase(script_voices.begin());
+    }
+
+    auto voice = std::make_unique<ma_sound>();
+    if (ma_sound_init_from_file(eng, path.c_str(), MA_SOUND_FLAG_DECODE, nullptr, nullptr,
+                                voice.get()) != MA_SUCCESS) {
+        static std::set<int> failed;
+        if (failed.insert(index).second) {
+            std::cerr << "[Script] Sound " << index << " failed to load: " << path << std::endl;
+        }
+        return;
+    }
+    ma_sound_set_volume(voice.get(), volume);
+    ma_sound_start(voice.get());
+    script_voices.push_back(std::move(voice));
+}
+
 void Engine::draw_script_hud() {
     if (current_state != EngineState::PlayInEditor) return;
 
-    const ScriptHud& hud = script_hud;
-    if (hud.pip_count <= 0 && hud.vignette <= 0.001f) return;
+    ScriptHud& hud = script_hud;
+    const bool has_message = hud.message_index >= 0 && hud.message_seconds_left > 0.0f &&
+                             hud.message_index < static_cast<int>(script_strings.size());
+    if (hud.pip_count <= 0 && hud.vignette <= 0.001f && !has_message) return;
 
     ImDrawList* dl = ImGui::GetForegroundDrawList();
     const float w = static_cast<float>(window->get_width());
@@ -2427,6 +2557,30 @@ void Engine::draw_script_hud() {
                                           : IM_COL32(255, 255, 255, 70), 20, 1.6f);
         }
     }
+
+    // A line of text along the lower third, where a subtitle sits - not the very
+    // bottom, which is where a mouse-captured game puts nothing and a windowed one
+    // puts a taskbar.
+    if (has_message) {
+        const std::string& line = script_strings[static_cast<size_t>(hud.message_index)];
+        if (!line.empty()) {
+            // Fade the last half second so a message leaving does not blink out.
+            float alpha = hud.message_seconds_left < 0.5f ? (hud.message_seconds_left / 0.5f) : 1.0f;
+
+            ImFont* font = ImGui::GetFont();
+            const float size = ImGui::GetFontSize() * 1.35f;
+            ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.0f, line.c_str());
+            ImVec2 at(w * 0.5f - extent.x * 0.5f, h * 0.76f);
+
+            // A dark plate behind it, because this draws over whatever the game is
+            // showing and light text on a pale wall is unreadable otherwise.
+            dl->AddRectFilled(ImVec2(at.x - 14.0f, at.y - 8.0f),
+                              ImVec2(at.x + extent.x + 14.0f, at.y + extent.y + 8.0f),
+                              IM_COL32(0, 0, 0, static_cast<int>(150 * alpha)), 6.0f);
+            dl->AddText(font, size, at,
+                        IM_COL32(240, 238, 230, static_cast<int>(255 * alpha)), line.c_str());
+        }
+    }
 }
 
 // Options and developer settings live alongside the graphics API in
@@ -2448,6 +2602,7 @@ void Engine::load_engine_options() {
         if (j.contains("enable_ssr"))        c.enable_ssr        = j["enable_ssr"].get<bool>();
         if (j.contains("enable_bloom"))      c.enable_bloom      = j["enable_bloom"].get<bool>();
         if (j.contains("ssao_strength"))     c.ssao_strength     = j["ssao_strength"].get<float>();
+        if (j.contains("exposure_bias"))     c.exposure_bias     = j["exposure_bias"].get<float>();
         if (j.contains("enable_taa"))        c.enable_taa_option = j["enable_taa"].get<bool>();
         if (j.contains("field_of_view"))     c.field_of_view     = j["field_of_view"].get<float>();
         if (j.contains("sky_hdri"))         c.sky_hdri          = j["sky_hdri"].get<std::string>();
@@ -2505,6 +2660,7 @@ void Engine::save_engine_options() {
         j["enable_ssr"]        = c.enable_ssr;
         j["enable_bloom"]      = c.enable_bloom;
         j["ssao_strength"]     = c.ssao_strength;
+        j["exposure_bias"]     = c.exposure_bias;
         j["enable_taa"]        = c.enable_taa_option;
         j["field_of_view"]     = c.field_of_view;
         j["sky_hdri"]          = c.sky_hdri;
@@ -2696,6 +2852,7 @@ void Engine::apply_engine_options() {
     }
     if (renderer) renderer->enable_ssr = active_config.enable_ssr;
     if (renderer) renderer->ssao_strength = active_config.ssao_strength;
+    if (renderer) renderer->exposure_bias = active_config.exposure_bias;
     // The main menu's Options tab calls this before the heavy subsystems exist, so
     // the miniaudio engine may not be initialised yet; it picks the volume up in
     // initialize_runtime() instead.
@@ -2747,6 +2904,10 @@ void Engine::draw_main_menu() {
                     std::lock_guard<std::mutex> lock(scene_mutex);
                     std::string path = f.result()[0];
                     if (SceneSerializer::load_scene(path, actors)) {
+                        // Only once the scene is known good, so a failed open leaves
+                        // the previous scene's tables intact rather than half-swapped.
+                        load_script_strings(path);
+                        load_script_sounds(path);
                         editor_ui.current_scene_path = path;
                         editor_ui.clear_selection();
                         current_state = EngineState::Editor;
@@ -2793,6 +2954,11 @@ void Engine::draw_main_menu() {
             ImGui::Separator();
             if (ImGui::Checkbox("Screen Space Reflections (SSR)", &c.enable_ssr)) dirty = true;
             if (ImGui::Checkbox("Bloom", &c.enable_bloom)) dirty = true;
+            if (ImGui::SliderFloat("Brightness", &c.exposure_bias, 0.25f, 4.0f, "%.2fx")) dirty = true;
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Raise this if the game is too dark to see.\n"
+                                  "1.00x is the intended exposure.");
+            }
             if (ImGui::SliderFloat("Ambient Occlusion", &c.ssao_strength, 0.0f, 1.0f, "%.2f")) dirty = true;
             if (ImGui::IsItemHovered()) {
                 ImGui::SetTooltip("How much ambient occlusion darkens indirect light.\n"

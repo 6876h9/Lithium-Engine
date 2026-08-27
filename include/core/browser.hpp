@@ -37,6 +37,9 @@ struct EngineConfig {
     bool enable_bloom = true;
     // Strength of ambient occlusion on indirect light. 1 is full effect.
     float ssao_strength = 1.0f;
+    // Viewer brightness. 1.0 is the artist's intent; raise it if the image is too
+    // dark to play on your panel.
+    float exposure_bias = 1.0f;
     bool enable_taa_option = true;
     float field_of_view = 45.0f;
     // Chosen environment map, relative to the executable. Empty means the bundled

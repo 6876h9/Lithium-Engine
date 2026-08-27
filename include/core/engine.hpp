@@ -1,5 +1,6 @@
 #pragma once
 
+#include "audio/audio_engine.hpp"
 #include "core/window.hpp"
 #include "renderer/renderer.hpp"
 #include "world/actor.hpp"
@@ -279,8 +280,35 @@ public:
         int   pip_count = 0;
         float vignette = 0.0f;                       // 0..1 screen-edge tint
         Vector3 vignette_color = { 1.0f, 0.0f, 0.0f };
+
+        // A line of text, addressed by index into the scene's string table rather
+        // than by content. C-Minus has no string type, and putting the sentences in
+        // the engine would mean shipping one game's script in every build - so the
+        // script names a line and the project supplies the words. -1 shows nothing.
+        int   message_index = -1;
+        float message_seconds_left = 0.0f;
     };
     ScriptHud script_hud;
+
+    // Lines a script may put on screen, loaded from "<scene>.strings" beside the
+    // scene file: one line of UTF-8 per index, blank lines kept so indices stay
+    // stable when a line is cleared. Empty when a project ships no table, which
+    // simply means hud_message() has nothing to show.
+    std::vector<std::string> script_strings;
+    void load_script_strings(const std::string& scene_path);
+
+    // Sound files a script may trigger, from "<scene>.sounds" beside the scene: one
+    // path per index, resolved relative to the working directory. Indexed for the
+    // same reason the strings are - C-Minus cannot name a file.
+    std::vector<std::string> script_sounds;
+    void load_script_sounds(const std::string& scene_path);
+    // Fires one-shot `index` at `volume`. Silently does nothing for an unknown index
+    // or before audio is up, because a missing sound must not stop a game.
+    void play_script_sound(int index, float volume);
+    // One-shot voices a script started, owned so each can carry its own volume.
+    // Reaped when they finish; see play_script_sound for why they are not left to
+    // miniaudio's fire-and-forget path.
+    std::vector<std::unique_ptr<ma_sound>> script_voices;
 
     // Whether a game UI widget swallowed the pointer during the last frame's canvas
     // pass. Read by viewport picking so a click on a button does not also select the

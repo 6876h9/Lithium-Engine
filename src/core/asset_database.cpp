@@ -58,7 +58,10 @@ std::string AssetDatabase::normalize_path(const std::string& path) {
         fs::path base = fs::current_path(ec);
         if (!ec) {
             fs::path rel = p.lexically_relative(base);
-            if (!rel.empty() && rel.native().rfind("..", 0) != 0) {
+            // generic_string(), not native(): on Windows native() is a wstring and
+            // will not compare against a narrow literal at all.
+            const std::string rel_str = rel.generic_string();
+            if (!rel_str.empty() && rel_str.rfind("..", 0) != 0) {
                 p = rel;
             }
         }

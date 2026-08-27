@@ -664,6 +664,35 @@ float Interpreter::evaluate(ExpressionNode* node) {
             }
             return 0.0f;
         }
+        // hud_message(index, seconds) - shows line `index` of the scene's .strings
+        // table for `seconds`. The index is how a language with no string type still
+        // gets to say something; the words live with the project, not the engine.
+        // A negative index clears whatever is showing.
+        if (name == "hud_message" && args.size() == 2) {
+            if (g_engine) {
+                const int idx = static_cast<int>(args[0]);
+                if (idx < 0) {
+                    g_engine->script_hud.message_index = -1;
+                    g_engine->script_hud.message_seconds_left = 0.0f;
+                } else {
+                    // Re-issuing the line already on screen refreshes its timer
+                    // rather than restarting the fade, so a script that calls this
+                    // every frame shows a steady message instead of a flickering one.
+                    g_engine->script_hud.message_index = idx;
+                    g_engine->script_hud.message_seconds_left = std::max(0.0f, args[1]);
+                }
+            }
+            return 0.0f;
+        }
+        // play_sound(index) / play_sound(index, volume) - fires one-shot `index` from
+        // the scene's .sounds manifest. Indexed for the same reason hud_message is.
+        if (name == "play_sound" && (args.size() == 1 || args.size() == 2)) {
+            if (g_engine) {
+                const float volume = args.size() == 2 ? std::clamp(args[1], 0.0f, 1.0f) : 1.0f;
+                g_engine->play_script_sound(static_cast<int>(args[0]), volume);
+            }
+            return 0.0f;
+        }
 
         if (name == "print" && args.size() == 1) std::cout << "[CMinus print] " << args[0] << std::endl;
         if (name == "raycast" && args.size() == 7) {

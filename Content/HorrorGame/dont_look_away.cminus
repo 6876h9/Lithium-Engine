@@ -75,6 +75,9 @@ if (ready == 0) {
     bob = 0.0;
     pulse = 0.0;
     stare = 0.0;
+    // Drives the opening lines. A game whose rules are only in a README is a game
+    // nobody knows how to play.
+    elapsed = 0.0;
     ready = 1;
 }
 
@@ -220,6 +223,16 @@ if (state == 1) {
                 charged = charged + 1;
                 pulse = 1.0;
                 print(charged);
+                play_sound(0.0, 0.9);
+                // Lines 3,4,5 count down the remaining beacons; 6 sends you home.
+                if (charged >= 4) {
+                    hud_message(6.0, 5.0);
+                    play_sound(2.0, 1.0);
+                } else {
+                    hud_message(2.0 + charged, 3.0);
+                }
+                // The opening lines have served their purpose once you are playing.
+                elapsed = 100.0;
             }
         }
         i = i + 1;
@@ -323,6 +336,8 @@ if (state == 1) {
     if (gap < 1.15) {
         caught_count = caught_count + 1;
         print(0.0 - 1.0);
+        hud_message(7.0, 4.0);
+        play_sound(1.0, 1.0);
 
         // It takes a beacon back with it. Recoverable, but you lose ground.
         i = 3;
@@ -350,6 +365,8 @@ if (state == 1) {
         if (px * px + pz * pz < 6.0) {
             state = 3;
             print(999.0);
+            hud_message(8.0, 600.0);
+            play_sound(3.0, 1.0);
             lock_mouse(0.0);
             mouse_locked = 0;
         }
@@ -423,6 +440,27 @@ while (i < 4) {
         }
     }
     i = i + 1;
+}
+
+// -----------------------------------------------------------------------------
+// The opening. Three lines, once, while you get your bearings - the objective,
+// the controls, then the one rule the whole game turns on. Re-issued every frame
+// inside its window because hud_message refreshes rather than restarts, so the
+// line holds steady instead of flickering.
+// -----------------------------------------------------------------------------
+elapsed = elapsed + dt;
+if (state == 1) {
+    if (elapsed < 6.0) {
+        hud_message(0.0, 1.0);
+    } else {
+        if (elapsed < 12.0) {
+            hud_message(1.0, 1.0);
+        } else {
+            if (elapsed < 17.0) {
+                hud_message(2.0, 1.0);
+            }
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
