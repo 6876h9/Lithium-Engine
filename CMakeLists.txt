@@ -394,8 +394,8 @@ foreach(target Lithium_Engine Lithium_Game)
         # The sample game. Its scene names the script by a path relative to the
         # working directory, so the two have to sit beside the executable together.
         COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_CURRENT_SOURCE_DIR}/Content/HorrorGame"
-            "$<TARGET_FILE_DIR:${target}>/Content/HorrorGame"
+            "${CMAKE_CURRENT_SOURCE_DIR}/Content/LithiumTest"
+            "$<TARGET_FILE_DIR:${target}>/Content/LithiumTest"
         # The CC0 sky library is a few hundred MB, so it is mirrored with
         # copy_directory_if_different rather than copy_directory: an unconditional
         # copy would re-write every HDRI on every single build.

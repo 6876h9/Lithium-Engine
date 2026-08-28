@@ -1,8 +1,8 @@
 // =============================================================================
-//  DON'T LOOK AWAY  -  a horror game for the Lithium engine
+//  LITHIUM TEST  -  the sample game for the Lithium engine
 //
-//  Attached to the "Stalker" actor by facility.lithium. Run it with:
-//      ./Lithium_Game Content/HorrorGame/facility.lithium
+//  Attached to the "Stalker" actor by lithium_test.lithium. Run it with:
+//      ./Lithium_Game Content/LithiumTest/lithium_test.lithium
 //
 //  One script runs the whole game, and it has to: a C-Minus script may only move
 //  the actor it is attached to, and the thing that most needs moving is the
@@ -12,7 +12,7 @@
 //  CONTROLS
 //    W A S D     walk                (the mouse is captured on the first frame)
 //    Escape      release the mouse
-//    Left Shift  capture it again
+//    Left Shift  sprint (1.5x), and recapture the mouse when it is loose
 //
 //  THE RULE
 //    It does not move while you are looking at it.
@@ -25,24 +25,10 @@
 if (ready == 0) {
 
     // --- level collision, generated alongside the scene ----------------------
-    // Generated from gen_level.py - must match facility.lithium.
-    wall_count = 16;
+    // Generated from gen_level.py - must match lithium_test.lithium.
+    wall_count = 2;
     wx[0] = 0.00; wz[0] = -20.00; wsx[0] = 20.50; wsz[0] = 0.50;   // Wall_North
     wx[1] = 0.00; wz[1] = 20.00; wsx[1] = 20.50; wsz[1] = 0.50;   // Wall_South
-    wx[2] = -20.00; wz[2] = 0.00; wsx[2] = 0.50; wsz[2] = 20.50;   // Wall_West
-    wx[3] = 20.00; wz[3] = 0.00; wsx[3] = 0.50; wsz[3] = 20.50;   // Wall_East
-    wx[4] = -12.50; wz[4] = 0.00; wsx[4] = 7.50; wsz[4] = 0.50;   // Divide_WestArm
-    wx[5] = 12.50; wz[5] = 0.00; wsx[5] = 7.50; wsz[5] = 0.50;   // Divide_EastArm
-    wx[6] = 0.00; wz[6] = -12.50; wsx[6] = 0.50; wsz[6] = 7.50;   // Divide_NorthArm
-    wx[7] = 0.00; wz[7] = 12.50; wsx[7] = 0.50; wsz[7] = 7.50;   // Divide_SouthArm
-    wx[8] = -12.00; wz[8] = -12.00; wsx[8] = 2.00; wsz[8] = 2.00;   // Pillar_NW
-    wx[9] = 12.00; wz[9] = -12.00; wsx[9] = 2.00; wsz[9] = 2.00;   // Pillar_NE
-    wx[10] = -12.00; wz[10] = 12.00; wsx[10] = 2.00; wsz[10] = 2.00;   // Pillar_SW
-    wx[11] = 12.00; wz[11] = 12.00; wsx[11] = 2.00; wsz[11] = 2.00;   // Pillar_SE
-    wx[12] = -4.00; wz[12] = -8.00; wsx[12] = 3.00; wsz[12] = 0.50;   // Baffle_N
-    wx[13] = 8.00; wz[13] = 4.00; wsx[13] = 0.50; wsz[13] = 3.00;   // Baffle_E
-    wx[14] = 4.00; wz[14] = 8.00; wsx[14] = 3.00; wsz[14] = 0.50;   // Baffle_S
-    wx[15] = -8.00; wz[15] = -4.00; wsx[15] = 0.50; wsz[15] = 3.00;   // Baffle_W
 
     bx[0] = -15.50; bz[0] = -15.50;   // Beacon_NW
     bx[1] = 15.50; bz[1] = -15.50;   // Beacon_NE
@@ -144,7 +130,13 @@ rz = 0.0 - sin(yaw);
 // -----------------------------------------------------------------------------
 moving = 0;
 if (state == 1) {
+    // Left Shift sprints at 1.5x. It is the same key that recaptures the mouse,
+    // which does not clash: recapture only does anything while the mouse is loose,
+    // and you are not moving then.
     walk = 2.7 * dt;
+    if (is_key_pressed(225)) {
+        walk = walk * 1.5;
+    }
     dx = 0.0;
     dz = 0.0;
 

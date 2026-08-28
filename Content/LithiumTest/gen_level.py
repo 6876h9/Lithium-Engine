@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Regenerates facility.lithium.
+"""Regenerates lithium_test.lithium.
 
 The wall list below is the single source of truth for the level: this script emits
-both the scene and the collision table that dont_look_away.cminus carries, so a wall
+both the scene and the collision table that lithium_test.cminus carries, so a wall
 cannot exist visually without also being solid. If you move a wall here, paste the
 printed table back over the one in the script's init block.
 
-    python3 Content/HorrorGame/gen_level.py
+    python3 Content/LithiumTest/gen_level.py
 """
 
 import json
@@ -14,31 +14,14 @@ import os
 
 # (name, centre_x, centre_z, size_x, size_z) - every wall is 4 tall, centred at y=2
 WALLS = [
+    # Two walls only. The perimeter and the cross of stubs were removed, so this is
+    # an open arena crossed by a single north and a single south wall.
+    #
+    # These are also the only collision in the level - there is no separate arena
+    # bound - so the east and west edges are open and you can walk off the floor.
     ("Wall_North",     0.0, -20.0, 41.0,  1.0),
     ("Wall_South",     0.0,  20.0, 41.0,  1.0),
-    ("Wall_West",    -20.0,   0.0,  1.0, 41.0),
-    ("Wall_East",     20.0,   0.0,  1.0, 41.0),
-
-    # A cross of stubs. The gaps at the tips are the only way between rooms, which
-    # is what turns the middle of the map into a crossing you have to commit to.
-    ("Divide_WestArm",  -12.5,   0.0, 15.0,  1.0),
-    ("Divide_EastArm",   12.5,   0.0, 15.0,  1.0),
-    ("Divide_NorthArm",   0.0, -12.5,  1.0, 15.0),
-    ("Divide_SouthArm",   0.0,  12.5,  1.0, 15.0),
-
-    # Blind corners inside each room. The stalker uses these as much as you do.
-    ("Pillar_NW", -12.0, -12.0, 4.0, 4.0),
-    ("Pillar_NE",  12.0, -12.0, 4.0, 4.0),
-    ("Pillar_SW", -12.0,  12.0, 4.0, 4.0),
-    ("Pillar_SE",  12.0,  12.0, 4.0, 4.0),
-
-    # Baffles that break the long corridor sightlines.
-    ("Baffle_N", -4.0, -8.0, 6.0, 1.0),
-    ("Baffle_E",  8.0,  4.0, 1.0, 6.0),
-    ("Baffle_S",  4.0,  8.0, 6.0, 1.0),
-    ("Baffle_W", -8.0, -4.0, 1.0, 6.0),
 ]
-
 BEACONS = [
     ("Beacon_NW", -15.5, -15.5),
     ("Beacon_NE",  15.5, -15.5),
@@ -49,7 +32,7 @@ BEACONS = [
 STRIPS = [(0.0, -7.0), (0.0, 7.0), (-7.0, 0.0), (7.0, 0.0)]
 
 WALL_H = 4.0
-SCRIPT_PATH = "Content/HorrorGame/dont_look_away.cminus"
+SCRIPT_PATH = "Content/LithiumTest/lithium_test.cminus"
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -155,13 +138,13 @@ scene = {
     "environment": {"hdri": "EngineContent/NightSky.hdr"},
 }
 
-out = os.path.join(HERE, "facility.lithium")
+out = os.path.join(HERE, "lithium_test.lithium")
 with open(out, "w") as f:
     json.dump(scene, f, indent=4)
 print("wrote %s (%d actors)" % (out, len(actors)))
 
 # --- the table the script has to agree with -----------------------------------
-print("\n// paste into the init block of dont_look_away.cminus:")
+print("\n// paste into the init block of lithium_test.cminus:")
 print("    wall_count = %d;" % len(WALLS))
 for i, (name, cx, cz, sx, sz) in enumerate(WALLS):
     print("    wx[%d] = %.2f; wz[%d] = %.2f; wsx[%d] = %.2f; wsz[%d] = %.2f;   // %s"

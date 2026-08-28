@@ -251,7 +251,12 @@ public:
     // frame - reading a query the frame it was issued stalls the pipeline until the
     // GPU has caught up, which costs more than the draws it would save.
     bool enable_frustum_culling = true;
-    bool enable_occlusion_culling = true;
+    // Off by default. An occlusion query answers a frame late and its failure mode
+    // is an object that is genuinely on screen being skipped - which reads as a wall
+    // vanishing and the sky showing through where it was. That trade is worth making
+    // for a heavy scene and worth nothing for a light one, so it is opt-in from the
+    // Options panel rather than on for everybody.
+    bool enable_occlusion_culling = false;
 
     // Rebuilds frustum_planes from the current projection * view. The planes are in
     // camera-relative world space, which is the space render_mesh already works in,

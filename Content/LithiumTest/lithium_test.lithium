@@ -1,0 +1,1145 @@
+{
+    "actors": [
+        {
+            "name": "Floor",
+            "shape_type": "Square",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.16,
+                0.15,
+                0.14
+            ],
+            "metallic": 0.0,
+            "roughness": 0.9,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    41.0,
+                    1.0,
+                    41.0
+                ]
+            }
+        },
+        {
+            "name": "Ceiling",
+            "shape_type": "Square",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.09,
+                0.09,
+                0.1
+            ],
+            "metallic": 0.0,
+            "roughness": 0.95,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    4.0,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    41.0,
+                    1.0,
+                    41.0
+                ]
+            }
+        },
+        {
+            "name": "Wall_North",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.2,
+                0.2,
+                0.21
+            ],
+            "metallic": 0.0,
+            "roughness": 0.88,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    2.0,
+                    -20.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    41.0,
+                    4.0,
+                    1.0
+                ]
+            }
+        },
+        {
+            "name": "Wall_South",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.2,
+                0.2,
+                0.21
+            ],
+            "metallic": 0.0,
+            "roughness": 0.88,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    2.0,
+                    20.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    41.0,
+                    4.0,
+                    1.0
+                ]
+            }
+        },
+        {
+            "name": "Beacon_NW",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.35,
+                0.75,
+                0.95
+            ],
+            "metallic": 0.0,
+            "roughness": 0.3,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    -15.5,
+                    0.7,
+                    -15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.5,
+                    1.4,
+                    0.5
+                ]
+            }
+        },
+        {
+            "name": "Beacon_NW_Glow",
+            "shape_type": "Sphere",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.75,
+                0.95,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.15,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    -15.5,
+                    1.6,
+                    -15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.4,
+                    0.4,
+                    0.4
+                ]
+            }
+        },
+        {
+            "name": "Beacon_NW_Light",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": true,
+            "actor_color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.85,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    -15.5,
+                    2.15,
+                    -15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.1,
+                    0.1,
+                    0.1
+                ]
+            },
+            "light_type": "PointLight",
+            "light_color": [
+                0.45,
+                0.75,
+                1.0
+            ],
+            "light_intensity": 26.0
+        },
+        {
+            "name": "Beacon_NE",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.35,
+                0.75,
+                0.95
+            ],
+            "metallic": 0.0,
+            "roughness": 0.3,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    15.5,
+                    0.7,
+                    -15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.5,
+                    1.4,
+                    0.5
+                ]
+            }
+        },
+        {
+            "name": "Beacon_NE_Glow",
+            "shape_type": "Sphere",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.75,
+                0.95,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.15,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    15.5,
+                    1.6,
+                    -15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.4,
+                    0.4,
+                    0.4
+                ]
+            }
+        },
+        {
+            "name": "Beacon_NE_Light",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": true,
+            "actor_color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.85,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    15.5,
+                    2.15,
+                    -15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.1,
+                    0.1,
+                    0.1
+                ]
+            },
+            "light_type": "PointLight",
+            "light_color": [
+                0.45,
+                0.75,
+                1.0
+            ],
+            "light_intensity": 26.0
+        },
+        {
+            "name": "Beacon_SW",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.35,
+                0.75,
+                0.95
+            ],
+            "metallic": 0.0,
+            "roughness": 0.3,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    -15.5,
+                    0.7,
+                    15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.5,
+                    1.4,
+                    0.5
+                ]
+            }
+        },
+        {
+            "name": "Beacon_SW_Glow",
+            "shape_type": "Sphere",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.75,
+                0.95,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.15,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    -15.5,
+                    1.6,
+                    15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.4,
+                    0.4,
+                    0.4
+                ]
+            }
+        },
+        {
+            "name": "Beacon_SW_Light",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": true,
+            "actor_color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.85,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    -15.5,
+                    2.15,
+                    15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.1,
+                    0.1,
+                    0.1
+                ]
+            },
+            "light_type": "PointLight",
+            "light_color": [
+                0.45,
+                0.75,
+                1.0
+            ],
+            "light_intensity": 26.0
+        },
+        {
+            "name": "Beacon_SE",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.35,
+                0.75,
+                0.95
+            ],
+            "metallic": 0.0,
+            "roughness": 0.3,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    15.5,
+                    0.7,
+                    15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.5,
+                    1.4,
+                    0.5
+                ]
+            }
+        },
+        {
+            "name": "Beacon_SE_Glow",
+            "shape_type": "Sphere",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.75,
+                0.95,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.15,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    15.5,
+                    1.6,
+                    15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.4,
+                    0.4,
+                    0.4
+                ]
+            }
+        },
+        {
+            "name": "Beacon_SE_Light",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": true,
+            "actor_color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.85,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    15.5,
+                    2.15,
+                    15.5
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.1,
+                    0.1,
+                    0.1
+                ]
+            },
+            "light_type": "PointLight",
+            "light_color": [
+                0.45,
+                0.75,
+                1.0
+            ],
+            "light_intensity": 26.0
+        },
+        {
+            "name": "ExitPad",
+            "shape_type": "Square",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.3,
+                0.22,
+                0.1
+            ],
+            "metallic": 0.0,
+            "roughness": 0.5,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    0.06,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    4.0,
+                    1.0,
+                    4.0
+                ]
+            }
+        },
+        {
+            "name": "ExitLamp",
+            "shape_type": "Sphere",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                1.0,
+                0.7,
+                0.35
+            ],
+            "metallic": 0.0,
+            "roughness": 0.3,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    3.3,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.3,
+                    0.3,
+                    0.3
+                ]
+            }
+        },
+        {
+            "name": "ExitLamp_Light",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": true,
+            "actor_color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.85,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    2.85,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.1,
+                    0.1,
+                    0.1
+                ]
+            },
+            "light_type": "PointLight",
+            "light_color": [
+                1.0,
+                0.55,
+                0.2
+            ],
+            "light_intensity": 14.0
+        },
+        {
+            "name": "Strip_0",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.55,
+                0.58,
+                0.62
+            ],
+            "metallic": 0.0,
+            "roughness": 0.4,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    3.75,
+                    -7.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    1.6,
+                    0.12,
+                    1.6
+                ]
+            }
+        },
+        {
+            "name": "Strip_0_Light",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": true,
+            "actor_color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.85,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    3.5,
+                    -7.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.1,
+                    0.1,
+                    0.1
+                ]
+            },
+            "light_type": "PointLight",
+            "light_color": [
+                0.55,
+                0.6,
+                0.72
+            ],
+            "light_intensity": 4.0
+        },
+        {
+            "name": "Strip_1",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.55,
+                0.58,
+                0.62
+            ],
+            "metallic": 0.0,
+            "roughness": 0.4,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    3.75,
+                    7.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    1.6,
+                    0.12,
+                    1.6
+                ]
+            }
+        },
+        {
+            "name": "Strip_1_Light",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": true,
+            "actor_color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.85,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    3.5,
+                    7.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.1,
+                    0.1,
+                    0.1
+                ]
+            },
+            "light_type": "PointLight",
+            "light_color": [
+                0.55,
+                0.6,
+                0.72
+            ],
+            "light_intensity": 4.0
+        },
+        {
+            "name": "Strip_2",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.55,
+                0.58,
+                0.62
+            ],
+            "metallic": 0.0,
+            "roughness": 0.4,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    -7.0,
+                    3.75,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    1.6,
+                    0.12,
+                    1.6
+                ]
+            }
+        },
+        {
+            "name": "Strip_2_Light",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": true,
+            "actor_color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.85,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    -7.0,
+                    3.5,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.1,
+                    0.1,
+                    0.1
+                ]
+            },
+            "light_type": "PointLight",
+            "light_color": [
+                0.55,
+                0.6,
+                0.72
+            ],
+            "light_intensity": 4.0
+        },
+        {
+            "name": "Strip_3",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.55,
+                0.58,
+                0.62
+            ],
+            "metallic": 0.0,
+            "roughness": 0.4,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    7.0,
+                    3.75,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    1.6,
+                    0.12,
+                    1.6
+                ]
+            }
+        },
+        {
+            "name": "Strip_3_Light",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": true,
+            "actor_color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.85,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    7.0,
+                    3.5,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.1,
+                    0.1,
+                    0.1
+                ]
+            },
+            "light_type": "PointLight",
+            "light_color": [
+                0.55,
+                0.6,
+                0.72
+            ],
+            "light_intensity": 4.0
+        },
+        {
+            "name": "Stalker",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": false,
+            "actor_color": [
+                0.05,
+                0.04,
+                0.05
+            ],
+            "metallic": 0.0,
+            "roughness": 0.7,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    -16.0,
+                    1.0,
+                    -6.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    0.75,
+                    2.0,
+                    0.75
+                ]
+            },
+            "script": {
+                "type": "cminus",
+                "path": "Content/LithiumTest/lithium_test.cminus"
+            }
+        },
+        {
+            "name": "Moon",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": true,
+            "actor_color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.85,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    12.0,
+                    0.0
+                ],
+                "rotation": [
+                    0.9,
+                    -0.6,
+                    0.0
+                ],
+                "scale": [
+                    1.0,
+                    1.0,
+                    1.0
+                ]
+            },
+            "light_type": "DirectionalLight",
+            "light_color": [
+                0.3,
+                0.38,
+                0.55
+            ],
+            "light_intensity": 0.06,
+            "sky_mode": 2,
+            "void_color": [
+                0.004,
+                0.006,
+                0.012
+            ],
+            "enable_3d_clouds": false
+        },
+        {
+            "name": "Ambience",
+            "shape_type": "Cube",
+            "mesh_path": "",
+            "material_path": "",
+            "is_invisible": true,
+            "actor_color": [
+                1.0,
+                1.0,
+                1.0
+            ],
+            "metallic": 0.0,
+            "roughness": 0.85,
+            "clearcoat": 0.0,
+            "clearcoat_roughness": 0.1,
+            "sheen": 0.0,
+            "subsurface": 0.0,
+            "transform": {
+                "position": [
+                    0.0,
+                    2.0,
+                    0.0
+                ],
+                "rotation": [
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "scale": [
+                    1.0,
+                    1.0,
+                    1.0
+                ]
+            },
+            "light_type": "SkyLight",
+            "light_color": [
+                0.1,
+                0.12,
+                0.18
+            ],
+            "light_intensity": 0.04
+        }
+    ],
+    "environment": {
+        "hdri": "EngineContent/NightSky.hdr"
+    }
+}

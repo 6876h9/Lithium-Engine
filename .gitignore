@@ -41,3 +41,7 @@ thirdparty/
 
 # Packaged game builds
 dist/
+
+# Packaged game builds (binaries, ~220MB)
+LithiumTest-Linux/
+LithiumTest-Windows/
