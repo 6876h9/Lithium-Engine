@@ -1,11 +1,14 @@
 #include <cstdlib>
 #include <algorithm>
 #include "core/editor.hpp"
+#include <functional>
+#include "core/external_editor.hpp"
 #include "core/platform.hpp"
 #include <nlohmann/json.hpp>
 #include "core/engine.hpp"
 #include "world/cpp_script_component.hpp"
 #include "world/light_components.hpp"
+#include "world/camera_component.hpp"
 #include "world/editor_primitive_actor.hpp"
 #include "world/directional_light_actor.hpp"
 #include "world/sprite_actor.hpp"
@@ -47,6 +50,7 @@
 #include "network/network_manager.hpp"
 Editor::Editor() {
     visual_script_editor.initialize();
+    load_preferences();
 }
 
 Editor::~Editor() {}
@@ -418,7 +422,9 @@ bool Editor::run_build(std::vector<std::shared_ptr<Actor>>& actors, const std::s
 
     // The scene the game boots into.
     // save_scene returns void, so verify by checking the file landed.
-    SceneSerializer::save_scene((dest / "project.lithium").string(), actors);
+    SceneSerializer::save_scene((dest / "project.lithium").string(), actors,
+                                std::vector<std::string>(outliner_folders.begin(),
+                                                         outliner_folders.end()));
     if (!fs::exists(dest / "project.lithium")) {
         problems += "  - scene could not be written\n";
     }
@@ -565,7 +571,9 @@ bool Editor::save_scene(std::vector<std::shared_ptr<Actor>>& actors) {
         current_scene_path = f.result();
         if (current_scene_path.find(".lithium") == std::string::npos) current_scene_path += ".lithium";
     }
-    SceneSerializer::save_scene(current_scene_path, actors);
+    SceneSerializer::save_scene(current_scene_path, actors,
+                                std::vector<std::string>(outliner_folders.begin(),
+                                                         outliner_folders.end()));
     scene_dirty = false;
     return true;
 }
@@ -702,6 +710,7 @@ EditorRequest Editor::render(std::vector<std::shared_ptr<Actor>>& actors, unsign
             }
             ImGui::EndTabItem();
         }
+        draw_preferences();
         if (show_script_editor) {
             bool open = true;
             if (ImGui::BeginTabItem("Script Editor", &open)) {
@@ -919,7 +928,9 @@ void Editor::draw_menu_bar(std::vector<std::shared_ptr<Actor>>& actors, bool& ou
                 if (!f.result().empty()) {
                     current_scene_path = f.result();
                     if (current_scene_path.find(".lithium") == std::string::npos) current_scene_path += ".lithium";
-                    SceneSerializer::save_scene(current_scene_path, actors);
+                    SceneSerializer::save_scene(current_scene_path, actors,
+                                std::vector<std::string>(outliner_folders.begin(),
+                                                         outliner_folders.end()));
                     scene_dirty = false;
                 }
             }
@@ -928,6 +939,12 @@ void Editor::draw_menu_bar(std::vector<std::shared_ptr<Actor>>& actors, bool& ou
                 if (!f.result().empty()) {
                     current_scene_path = f.result()[0];
                     SceneSerializer::load_scene(current_scene_path, actors);
+                    // Including folders that hold nothing, which no actor could
+                    // have told us about.
+                    outliner_folders.clear();
+                    for (const std::string& folder : SceneSerializer::last_loaded_folders()) {
+                        outliner_folders.insert(folder);
+                    }
                     scene_dirty = false;
                     clear_selection();
                 }
@@ -951,7 +968,7 @@ void Editor::draw_menu_bar(std::vector<std::shared_ptr<Actor>>& actors, bool& ou
             if (ImGui::MenuItem("Navigation...")) show_navigation_window = true;
             if (ImGui::MenuItem("Collision Layers...")) show_collision_layers = true;
             if (ImGui::MenuItem("Audio Buses...")) show_audio_buses = true;
-            if (ImGui::MenuItem("Preferences")) {}
+            if (ImGui::MenuItem("Preferences...")) show_preferences = true;
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Rendering")) {
@@ -1178,75 +1195,651 @@ void Editor::draw_menu_bar(std::vector<std::shared_ptr<Actor>>& actors, bool& ou
     }
 }
 
+namespace {
+
+// Splits a trailing " (N)" off a name, so duplicating "Cube (2)" yields "Cube (3)"
+// rather than "Cube (2) (1)". Only a run of digits in parentheses at the very end
+// counts, so a legitimately-named "Barrel (Broken)" keeps its suffix.
+std::string strip_duplicate_suffix(const std::string& name) {
+    if (name.size() < 4 || name.back() != ')') return name;
+
+    const size_t open = name.find_last_of('(');
+    if (open == std::string::npos || open == 0) return name;
+    // Exactly one space before the parenthesis is the shape this writes, and the
+    // shape it will consume again.
+    if (name[open - 1] != ' ') return name;
+
+    for (size_t i = open + 1; i + 1 < name.size(); ++i) {
+        if (!std::isdigit(static_cast<unsigned char>(name[i]))) return name;
+    }
+    // "Cube ()" has no digits between the parentheses and is not a suffix.
+    if (open + 1 >= name.size() - 1) return name;
+
+    return name.substr(0, open - 1);
+}
+
+// First free name in the "stem", "stem (1)", "stem (2)" sequence.
+//
+// The base name itself is offered first: renaming something to a name nobody else
+// holds must not gratuitously append "(1)".
+std::string unique_name(const std::string& desired,
+                        const std::function<bool(const std::string&)>& taken) {
+    if (!taken(desired)) return desired;
+
+    const std::string stem = strip_duplicate_suffix(desired);
+    // Bounded so a pathological scene cannot spin here; 10000 of one name is
+    // already far past anything anyone organises by hand.
+    for (int i = 1; i < 10000; ++i) {
+        const std::string candidate = stem + " (" + std::to_string(i) + ")";
+        if (!taken(candidate)) return candidate;
+    }
+    return desired;
+}
+
+} // namespace
+
+// =============================================================================
+//  Outliner folders
+//
+//  Purely an editor-side organisation aid: a folder is a string on the actor, not
+//  a node in the scene graph. Attaching actors to a real parent transform would
+//  have moved them, which is emphatically not what "put these in a folder" means.
+//  So folders have no effect on transforms, parenting, physics or gameplay - they
+//  are exactly what a directory is in a file browser.
+// =============================================================================
+
+namespace {
+
+// Parent of a folder path, or empty for a top-level one.
+std::string folder_parent(const std::string& path) {
+    const size_t slash = path.find_last_of('/');
+    return (slash == std::string::npos) ? std::string() : path.substr(0, slash);
+}
+
+// Last component of a folder path - what is actually shown on the row.
+std::string folder_leaf(const std::string& path) {
+    const size_t slash = path.find_last_of('/');
+    return (slash == std::string::npos) ? path : path.substr(slash + 1);
+}
+
+// True if `path` is `ancestor` or sits underneath it. The trailing slash matters:
+// without it "Lights" would claim "LightsB" as a child.
+bool is_within(const std::string& path, const std::string& ancestor) {
+    if (ancestor.empty()) return true;
+    if (path == ancestor) return true;
+    return path.size() > ancestor.size() &&
+           path.compare(0, ancestor.size(), ancestor) == 0 &&
+           path[ancestor.size()] == '/';
+}
+
+// Strips characters that would break the path encoding or read as nesting the user
+// did not ask for. A name is a single component; nesting is done by dragging.
+std::string sanitize_folder_name(const std::string& name) {
+    std::string cleaned;
+    for (char c : name) {
+        if (c == '/' || c == '\\') continue;
+        cleaned += c;
+    }
+    // Trim, so a name of only spaces cannot produce an unclickable blank row.
+    const size_t first = cleaned.find_first_not_of(" \t");
+    if (first == std::string::npos) return {};
+    const size_t last = cleaned.find_last_not_of(" \t");
+    return cleaned.substr(first, last - first + 1);
+}
+
+// Payload id for dragging an actor onto a folder.
+constexpr const char* kActorDragType = "OUTLINER_ACTOR";
+
+} // namespace
+
+bool Editor::actor_matches_filter(const Actor* actor) const {
+    if (outliner_filter[0] == '\0') return true;
+    std::string filter_lower = outliner_filter;
+    std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+    std::string label = actor->get_name() + " (" + actor->shape_type + ")";
+    std::transform(label.begin(), label.end(), label.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return label.find(filter_lower) != std::string::npos;
+}
+
+void Editor::accept_actor_drop(const std::string& target_folder) {
+    if (!ImGui::BeginDragDropTarget()) return;
+    if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload(kActorDragType)) {
+        Actor* dragged = *static_cast<Actor* const*>(payload->Data);
+        if (dragged) {
+            // The whole selection moves, not just the row under the cursor. Dragging
+            // one of five selected actors and having the other four stay put is the
+            // more surprising behaviour.
+            if (is_actor_selected(dragged)) {
+                for (Actor* actor : selected_actors) {
+                    if (actor) actor->set_folder_path(target_folder);
+                }
+            } else {
+                dragged->set_folder_path(target_folder);
+            }
+            scene_dirty = true;
+        }
+    }
+    ImGui::EndDragDropTarget();
+}
+
+void Editor::rename_outliner_folder(const std::string& old_path, const std::string& new_name,
+                                    std::vector<std::shared_ptr<Actor>>& actors) {
+    const std::string cleaned = sanitize_folder_name(new_name);
+    if (cleaned.empty() || old_path.empty()) return;
+
+    const std::string parent = folder_parent(old_path);
+    const std::string new_path = parent.empty() ? cleaned : parent + "/" + cleaned;
+    if (new_path == old_path) return;
+    // A rename onto an existing sibling would silently merge the two, which is not
+    // what a rename means and cannot be undone by renaming back.
+    if (outliner_folders.count(new_path)) return;
+
+    // Re-file the folder itself and every folder nested inside it.
+    std::set<std::string> updated;
+    for (const std::string& folder : outliner_folders) {
+        updated.insert(is_within(folder, old_path)
+            ? new_path + folder.substr(old_path.size())
+            : folder);
+    }
+    outliner_folders = std::move(updated);
+
+    for (const auto& actor : actors) {
+        if (actor && is_within(actor->get_folder_path(), old_path)) {
+            actor->set_folder_path(new_path + actor->get_folder_path().substr(old_path.size()));
+        }
+    }
+    scene_dirty = true;
+}
+
+void Editor::delete_outliner_folder(const std::string& path,
+                                    std::vector<std::shared_ptr<Actor>>& actors) {
+    if (path.empty()) return;
+    const std::string parent = folder_parent(path);
+
+    // Contents move up to the parent rather than being destroyed. Deleting a folder
+    // is an organisational act; taking the actors with it would make it a
+    // catastrophic one, and there is no confirmation dialog here to justify that.
+    for (const auto& actor : actors) {
+        if (!actor) continue;
+        const std::string& folder = actor->get_folder_path();
+        if (!is_within(folder, path)) continue;
+        if (folder == path) {
+            actor->set_folder_path(parent);
+        } else {
+            // A nested folder's actors keep their sub-path, re-rooted at the parent.
+            const std::string remainder = folder.substr(path.size() + 1);
+            actor->set_folder_path(parent.empty() ? remainder : parent + "/" + remainder);
+        }
+    }
+
+    std::set<std::string> remaining;
+    for (const std::string& folder : outliner_folders) {
+        if (is_within(folder, path)) {
+            if (folder == path) continue;   // the folder itself is gone
+            const std::string remainder = folder.substr(path.size() + 1);
+            remaining.insert(parent.empty() ? remainder : parent + "/" + remainder);
+        } else {
+            remaining.insert(folder);
+        }
+    }
+    outliner_folders = std::move(remaining);
+    scene_dirty = true;
+}
+
+void Editor::draw_outliner_actor(Actor* actor) {
+    ImGui::PushID(actor);
+
+    // Renaming replaces the row with an input field rather than opening a modal:
+    // the name is right there, and a dialog for a one-word edit is heavy.
+    if (renaming_actor == actor) {
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        // Focus the field the frame the rename starts, so typing works immediately
+        // without a click. rename_focus_pending is cleared once it has been taken.
+        if (rename_focus_pending) {
+            ImGui::SetKeyboardFocusHere();
+            rename_focus_pending = false;
+        }
+        const bool committed = ImGui::InputText("##rename_actor", renaming_actor_buf,
+                                                sizeof(renaming_actor_buf),
+                                                ImGuiInputTextFlags_EnterReturnsTrue |
+                                                ImGuiInputTextFlags_AutoSelectAll);
+        // Commit on click-away as well as Enter. Losing an edit because you clicked
+        // elsewhere is infuriating, and it is how most people finish typing.
+        if (committed || ImGui::IsItemDeactivatedAfterEdit()) {
+            std::string wanted(renaming_actor_buf);
+            // Trim: a name of only spaces produces an unreadable, unclickable row.
+            const size_t first = wanted.find_first_not_of(" \t");
+            if (first != std::string::npos) {
+                wanted = wanted.substr(first, wanted.find_last_not_of(" \t") - first + 1);
+                if (!wanted.empty() && wanted != actor->get_name()) {
+                    // Uniqueness is enforced against every other actor, so two rows
+                    // in the Outliner can never read identically.
+                    actor->set_name(unique_name(wanted, [this, actor](const std::string& candidate) {
+                        if (!active_actors) return false;
+                        for (const auto& other : *active_actors) {
+                            if (other && other.get() != actor && other->get_name() == candidate) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }));
+                    scene_dirty = true;
+                }
+            }
+            renaming_actor = nullptr;
+        } else if (ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+            renaming_actor = nullptr;
+        }
+        ImGui::PopID();
+        return;
+    }
+
+    const std::string label = actor->get_name() + " (" + actor->shape_type + ")";
+    const bool selected = is_actor_selected(actor);
+    if (ImGui::Selectable(label.c_str(), selected)) {
+        if (!ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift) {
+            clear_selection();
+        }
+        if (selected && (ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift)) {
+            for (auto it = selected_actors.begin(); it != selected_actors.end(); ++it) {
+                if (*it == actor) { selected_actors.erase(it); break; }
+            }
+        } else if (!selected) {
+            select_actor(actor);
+        }
+    }
+
+    // Drag source. The payload is the actor pointer; the scene owns the actors and
+    // outlives the drag, so a raw pointer is safe for the duration.
+    if (ImGui::BeginDragDropSource(ImGuiDragDropFlags_SourceAllowNullID)) {
+        Actor* payload = actor;
+        ImGui::SetDragDropPayload(kActorDragType, &payload, sizeof(Actor*));
+        const size_t moving = is_actor_selected(actor) ? selected_actors.size() : 1;
+        if (moving > 1) {
+            ImGui::Text("Move %zu actors", moving);
+        } else {
+            ImGui::Text("Move %s", actor->get_name().c_str());
+        }
+        ImGui::EndDragDropSource();
+    }
+
+    // Double-click a selected row to rename, the way a file manager does. Guarded on
+    // the row being hovered so a double-click in empty space does nothing.
+    if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        renaming_actor = actor;
+        rename_focus_pending = true;
+        std::snprintf(renaming_actor_buf, sizeof(renaming_actor_buf), "%s",
+                      actor->get_name().c_str());
+    }
+
+    if (ImGui::BeginPopupContextItem()) {
+        if (!is_actor_selected(actor)) {
+            clear_selection();
+            select_actor(actor);
+        }
+        ImGui::TextDisabled("%s", actor->get_name().c_str());
+        ImGui::Separator();
+        if (ImGui::MenuItem("Rename", "F2")) {
+            renaming_actor = actor;
+            rename_focus_pending = true;
+            std::snprintf(renaming_actor_buf, sizeof(renaming_actor_buf), "%s",
+                          actor->get_name().c_str());
+        }
+        if (ImGui::MenuItem("Duplicate", "Ctrl+D") && active_actors) {
+            pending_duplicate = true;
+        }
+        if (ImGui::MenuItem("Copy", "Ctrl+C")) {
+            copy_selected_actors();
+        }
+        if (ImGui::MenuItem("Paste", "Ctrl+V", false, !actor_clipboard.empty())) {
+            pending_paste = true;
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Create Prefab")) {
+            create_prefab_from_actor(actor);
+        }
+        // Moving without dragging, which matters for a folder scrolled off screen.
+        if (ImGui::BeginMenu("Move to Folder")) {
+            if (ImGui::MenuItem("(root)")) {
+                for (Actor* a : selected_actors) if (a) a->set_folder_path("");
+                scene_dirty = true;
+            }
+            for (const std::string& folder : outliner_folders) {
+                if (ImGui::MenuItem(folder.c_str())) {
+                    for (Actor* a : selected_actors) if (a) a->set_folder_path(folder);
+                    scene_dirty = true;
+                }
+            }
+            ImGui::EndMenu();
+        }
+        ImGui::EndPopup();
+    }
+    ImGui::PopID();
+}
+
+void Editor::draw_outliner_folder(const std::string& path, const std::string& display_name,
+                                  std::vector<std::shared_ptr<Actor>>& actors) {
+    // Immediate children of this folder, and the actors filed directly in it.
+    std::vector<std::string> child_folders;
+    for (const std::string& folder : outliner_folders) {
+        if (folder_parent(folder) == path && !folder.empty()) child_folders.push_back(folder);
+    }
+
+    std::vector<Actor*> contained;
+    for (const auto& actor : actors) {
+        if (actor && actor->get_folder_path() == path && actor_matches_filter(actor.get())) {
+            contained.push_back(actor.get());
+        }
+    }
+
+    // A search hides folders that contain nothing matching, so filtering a large
+    // scene does not leave a screen of empty folder rows to read past.
+    if (outliner_filter[0] != '\0' && contained.empty()) {
+        bool descendant_matches = false;
+        for (const auto& actor : actors) {
+            if (actor && is_within(actor->get_folder_path(), path) &&
+                actor_matches_filter(actor.get())) {
+                descendant_matches = true;
+                break;
+            }
+        }
+        if (!descendant_matches) return;
+    }
+
+    ImGui::PushID(path.c_str());
+
+    // Renaming replaces the row with an input field, so the tree does not reflow
+    // under a modal while the user is typing.
+    if (renaming_folder == path) {
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool committed = ImGui::InputText("##rename_folder", renaming_folder_buf,
+                                                sizeof(renaming_folder_buf),
+                                                ImGuiInputTextFlags_EnterReturnsTrue |
+                                                ImGuiInputTextFlags_AutoSelectAll);
+        // Committing on lost focus as well as on Enter: clicking away is how most
+        // people finish typing, and losing the edit there is infuriating.
+        if (committed || (!ImGui::IsItemActive() && ImGui::IsItemDeactivated())) {
+            rename_outliner_folder(path, renaming_folder_buf, actors);
+            renaming_folder.clear();
+        }
+        ImGui::PopID();
+        return;
+    }
+
+    // Auto-expand while searching, or a match nested three folders down is invisible.
+    if (outliner_filter[0] != '\0') ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+
+    const std::string label = "[F] " + display_name;
+    const bool open = ImGui::TreeNodeEx(label.c_str(),
+                                        ImGuiTreeNodeFlags_SpanAvailWidth |
+                                        ImGuiTreeNodeFlags_OpenOnArrow |
+                                        ImGuiTreeNodeFlags_DefaultOpen);
+
+    // Dropping onto the folder row files the dragged actors here.
+    accept_actor_drop(path);
+
+    if (ImGui::BeginPopupContextItem()) {
+        ImGui::TextDisabled("%s", path.c_str());
+        ImGui::Separator();
+        if (ImGui::MenuItem("New Subfolder")) {
+            pending_folder_parent = path;
+            new_folder_name[0] = '\0';
+            open_new_folder_popup = true;
+        }
+        if (ImGui::MenuItem("Rename")) {
+            renaming_folder = path;
+            std::snprintf(renaming_folder_buf, sizeof(renaming_folder_buf), "%s",
+                          folder_leaf(path).c_str());
+        }
+        if (ImGui::MenuItem("Select Contents")) {
+            clear_selection();
+            for (const auto& actor : actors) {
+                if (actor && is_within(actor->get_folder_path(), path)) select_actor(actor.get());
+            }
+        }
+        ImGui::Separator();
+        if (ImGui::MenuItem("Delete Folder")) {
+            // Deferred: mutating the folder set while the tree that is iterating it
+            // is still on the stack would invalidate the iteration.
+            pending_folder_delete = path;
+        }
+        ImGui::TextDisabled("Contents move to the parent folder.");
+        ImGui::EndPopup();
+    }
+
+    if (open) {
+        std::sort(child_folders.begin(), child_folders.end());
+        for (const std::string& child : child_folders) {
+            draw_outliner_folder(child, folder_leaf(child), actors);
+        }
+        for (Actor* actor : contained) {
+            draw_outliner_actor(actor);
+        }
+        if (child_folders.empty() && contained.empty()) {
+            ImGui::TextDisabled("  (empty)");
+        }
+        ImGui::TreePop();
+    }
+    ImGui::PopID();
+}
+
+
+// =============================================================================
+//  Duplicate, copy and paste
+// =============================================================================
+
+
+
+std::string Editor::next_available_name(const std::string& desired,
+                                        const std::function<bool(const std::string&)>& taken) {
+    return unique_name(desired, taken);
+}
+
+void Editor::duplicate_selected_actors(std::vector<std::shared_ptr<Actor>>& actors) {
+    if (selected_actors.empty()) return;
+
+    // The originals are captured before anything is appended, or the loop would
+    // walk into the copies it is making and duplicate forever.
+    const std::vector<Actor*> sources = selected_actors;
+    std::vector<Actor*> created;
+
+    for (Actor* source : sources) {
+        if (!source) continue;
+        std::shared_ptr<Actor> copy = SceneSerializer::clone_actor(source);
+        if (!copy) continue;
+
+        copy->set_name(unique_name(source->get_name(), [&actors](const std::string& candidate) {
+            for (const auto& actor : actors) {
+                if (actor && actor->get_name() == candidate) return true;
+            }
+            return false;
+        }));
+        // A duplicate stays in the folder its original was filed in, which is where
+        // anyone organising a scene expects to find it.
+        copy->set_folder_path(source->get_folder_path());
+        created.push_back(copy.get());
+        actors.push_back(std::move(copy));
+    }
+
+    // Select what was just made, not what it came from: the next thing anyone does
+    // to a duplicate is move it.
+    clear_selection();
+    for (Actor* actor : created) select_actor(actor);
+    scene_dirty = true;
+}
+
+void Editor::copy_selected_actors() {
+    actor_clipboard.clear();
+    for (Actor* actor : selected_actors) {
+        if (!actor) continue;
+        // Cloned into the clipboard rather than referenced, so a copy survives the
+        // original being deleted before the paste.
+        if (auto copy = SceneSerializer::clone_actor(actor)) {
+            actor_clipboard.push_back(std::move(copy));
+        }
+    }
+}
+
+void Editor::paste_actors(std::vector<std::shared_ptr<Actor>>& actors) {
+    if (actor_clipboard.empty()) return;
+    std::vector<Actor*> created;
+
+    for (const auto& stored : actor_clipboard) {
+        // Cloned again on the way out, so pasting twice produces two independent
+        // actors rather than two references to the clipboard's own copy.
+        std::shared_ptr<Actor> copy = SceneSerializer::clone_actor(stored.get());
+        if (!copy) continue;
+
+        copy->set_name(unique_name(stored->get_name(), [&actors](const std::string& candidate) {
+            for (const auto& actor : actors) {
+                if (actor && actor->get_name() == candidate) return true;
+            }
+            return false;
+        }));
+        created.push_back(copy.get());
+        actors.push_back(std::move(copy));
+    }
+
+    clear_selection();
+    for (Actor* actor : created) select_actor(actor);
+    scene_dirty = true;
+}
+
 void Editor::draw_outliner(std::vector<std::shared_ptr<Actor>>& actors) {
     ImGui::TextColored(ImVec4(0.85f, 0.45f, 0.0f, 1.0f), "Scene Outliner");
     ImGui::Separator();
-    ImGui::Dummy(ImVec2(0.0f, 5.0f));
 
-    if (actors.empty()) {
-        ImGui::TextDisabled("No Actors in World");
-        return;
+    if (ImGui::SmallButton("New Folder")) {
+        pending_folder_parent.clear();   // top level
+        new_folder_name[0] = '\0';
+        open_new_folder_popup = true;
     }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(drag actors onto a folder)");
+    ImGui::Dummy(ImVec2(0.0f, 3.0f));
 
     // Name filter. A populated scene runs well past what fits in the panel, and the
     // list had no way to narrow it.
     ImGui::SetNextItemWidth(-1.0f);
     ImGui::InputTextWithHint("##OutlinerFilter", "Search actors...", outliner_filter, sizeof(outliner_filter));
-    std::string filter_lower = outliner_filter;
-    std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     ImGui::Dummy(ImVec2(0.0f, 3.0f));
 
-    int shown = 0;
-    for (size_t i = 0; i < actors.size(); ++i) {
-        Actor* actor = actors[i].get();
-        std::string label = actor->get_name() + " (" + actor->shape_type + ")";
-
-        if (!filter_lower.empty()) {
-            std::string label_lower = label;
-            std::transform(label_lower.begin(), label_lower.end(), label_lower.begin(),
-                           [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-            if (label_lower.find(filter_lower) == std::string::npos) continue;
+    if (open_new_folder_popup) {
+        ImGui::OpenPopup("New Folder");
+        open_new_folder_popup = false;
+    }
+    if (ImGui::BeginPopupModal("New Folder", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        if (pending_folder_parent.empty()) {
+            ImGui::TextDisabled("At the top level");
+        } else {
+            ImGui::TextDisabled("Inside %s", pending_folder_parent.c_str());
         }
-        ++shown;
+        if (ImGui::IsWindowAppearing()) ImGui::SetKeyboardFocusHere();
+        const bool submitted = ImGui::InputText("Name", new_folder_name, sizeof(new_folder_name),
+                                                ImGuiInputTextFlags_EnterReturnsTrue);
+        const bool confirmed = ImGui::Button("Create", ImVec2(120.0f, 0.0f)) || submitted;
+        ImGui::SameLine();
+        const bool cancelled = ImGui::Button("Cancel", ImVec2(120.0f, 0.0f));
 
-        bool selected = is_actor_selected(actor);
-        
-        if (ImGui::Selectable(label.c_str(), selected)) {
-            if (!ImGui::GetIO().KeyCtrl && !ImGui::GetIO().KeyShift) {
-                clear_selection();
+        if (confirmed) {
+            const std::string cleaned = sanitize_folder_name(new_folder_name);
+            if (!cleaned.empty()) {
+                const std::string path = pending_folder_parent.empty()
+                    ? cleaned
+                    : pending_folder_parent + "/" + cleaned;
+                outliner_folders.insert(path);
+                scene_dirty = true;
             }
-            if (selected && (ImGui::GetIO().KeyCtrl || ImGui::GetIO().KeyShift)) {
-                // Deselect
-                for (auto it = selected_actors.begin(); it != selected_actors.end(); ++it) {
-                    if (*it == actor) {
-                        selected_actors.erase(it);
-                        break;
-                    }
-                }
-            } else if (!selected) {
-                select_actor(actor);
-            }
+            ImGui::CloseCurrentPopup();
         }
+        if (cancelled) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
 
-        // Right-click the row to turn it into a reusable asset. Selecting it first
-        // means the menu always acts on the actor actually under the cursor.
-        if (ImGui::BeginPopupContextItem()) {
-            if (!is_actor_selected(actor)) {
-                clear_selection();
-                select_actor(actor);
-            }
-            ImGui::TextDisabled("%s", actor->get_name().c_str());
-            ImGui::Separator();
-            if (ImGui::MenuItem("Create Prefab")) {
-                create_prefab_from_actor(actor);
-            }
-            ImGui::EndPopup();
+    if (actors.empty() && outliner_folders.empty()) {
+        ImGui::TextDisabled("No Actors in World");
+        return;
+    }
+
+    // A folder path on an actor is authoritative: a scene loaded from a file, or one
+    // whose actor was moved by a script, can reference a folder this set has never
+    // seen. Adopting it here means the actor is never orphaned into invisibility.
+    for (const auto& actor : actors) {
+        if (!actor || actor->get_folder_path().empty()) continue;
+        std::string path = actor->get_folder_path();
+        // Every ancestor has to exist too, or the tree has a hole in the middle and
+        // the leaf never gets drawn.
+        while (!path.empty()) {
+            outliner_folders.insert(path);
+            const size_t slash = path.find_last_of('/');
+            path = (slash == std::string::npos) ? std::string() : path.substr(0, slash);
         }
     }
 
-    if (shown == 0) {
+    // Top-level folders first, then the actors filed at the root.
+    std::vector<std::string> roots;
+    for (const std::string& folder : outliner_folders) {
+        if (folder.find('/') == std::string::npos) roots.push_back(folder);
+    }
+    std::sort(roots.begin(), roots.end());
+
+    ImGui::BeginChild("OutlinerTree", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None);
+    for (const std::string& folder : roots) {
+        draw_outliner_folder(folder, folder, actors);
+    }
+
+    int shown = 0;
+    for (const auto& actor : actors) {
+        if (!actor || !actor->get_folder_path().empty()) continue;
+        if (!actor_matches_filter(actor.get())) continue;
+        draw_outliner_actor(actor.get());
+        ++shown;
+    }
+
+    // Dropping on empty space below the tree files actors back at the root, which is
+    // the only way to get one out of a folder by dragging.
+    ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, std::max(24.0f, ImGui::GetContentRegionAvail().y)));
+    accept_actor_drop("");
+    ImGui::EndChild();
+
+    if (shown == 0 && roots.empty() && outliner_filter[0] != '\0') {
         ImGui::TextDisabled("No actors match \"%s\"", outliner_filter);
+    }
+
+    // Applied after the tree has been walked, so neither the folder set nor the
+    // actor list is mutated while the recursion that reads them is still live.
+    if (!pending_folder_delete.empty()) {
+        delete_outliner_folder(pending_folder_delete, actors);
+        pending_folder_delete.clear();
+    }
+
+    // Shortcuts, handled while the Outliner has focus so they cannot fire while the
+    // user is typing into a field elsewhere in the editor. WantTextInput covers the
+    // rename field itself - Ctrl+V there belongs to the text box, not to us.
+    const ImGuiIO& io = ImGui::GetIO();
+    if (ImGui::IsWindowFocused(ImGuiFocusedFlags_RootAndChildWindows) && !io.WantTextInput) {
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_D, false)) pending_duplicate = true;
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) copy_selected_actors();
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_V, false)) pending_paste = true;
+        if (ImGui::IsKeyPressed(ImGuiKey_F2, false) && selected_actors.size() == 1) {
+            renaming_actor = selected_actors[0];
+            rename_focus_pending = true;
+            std::snprintf(renaming_actor_buf, sizeof(renaming_actor_buf), "%s",
+                          selected_actors[0]->get_name().c_str());
+        }
+    }
+
+    if (pending_duplicate) {
+        duplicate_selected_actors(actors);
+        pending_duplicate = false;
+    }
+    if (pending_paste) {
+        paste_actors(actors);
+        pending_paste = false;
     }
 }
 
@@ -1871,9 +2464,38 @@ void Editor::draw_properties() {
     char name_buf[64];
     strncpy(name_buf, primary_actor->get_name().c_str(), sizeof(name_buf));
     if (selected_actors.size() == 1) {
-        if (ImGui::InputText("Actor Name", name_buf, sizeof(name_buf))) {
-            primary_actor->set_name(name_buf);
+        // Committed on Enter or on click-away, not per keystroke. Renaming on every
+        // character would run the uniqueness check against half-typed names and
+        // append a "(1)" the moment the partial name happened to match another actor.
+        if (ImGui::InputText("Actor Name", name_buf, sizeof(name_buf),
+                             ImGuiInputTextFlags_EnterReturnsTrue) ||
+            ImGui::IsItemDeactivatedAfterEdit()) {
+            std::string wanted(name_buf);
+            const size_t first = wanted.find_first_not_of(" \t");
+            if (first != std::string::npos) {
+                wanted = wanted.substr(first, wanted.find_last_not_of(" \t") - first + 1);
+            } else {
+                wanted.clear();
+            }
+            if (!wanted.empty() && wanted != primary_actor->get_name()) {
+                primary_actor->set_name(unique_name(wanted,
+                    [this, primary_actor](const std::string& candidate) {
+                        if (!active_actors) return false;
+                        for (const auto& other : *active_actors) {
+                            if (other && other.get() != primary_actor &&
+                                other->get_name() == candidate) {
+                                return true;
+                            }
+                        }
+                        return false;
+                    }));
+                scene_dirty = true;
+            }
+            // Reflect whatever the name actually became, including any suffix.
+            std::snprintf(name_buf, sizeof(name_buf), "%s", primary_actor->get_name().c_str());
         }
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Duplicate")) pending_duplicate = true;
     }
 
     ImGui::Dummy(ImVec2(0.0f, 10.0f));
@@ -2003,6 +2625,154 @@ void Editor::draw_properties() {
     }
     ImGui::TextDisabled("Self-illumination. Above ~1 it starts to bloom.");
 
+    // Emission colour is separate from the intensity above: together they are what
+    // makes a warm bulb in a grey housing expressible. Multiplying albedo by a
+    // scalar, as this used to, meant a white object could only glow white and a
+    // black one could not glow at all.
+    float emission_col[3] = { primary_actor->emission_color.x,
+                              primary_actor->emission_color.y,
+                              primary_actor->emission_color.z };
+    if (ImGui::ColorEdit3("Emission Color", emission_col)) {
+        for (Actor* actor : selected_actors) {
+            actor->emission_color = { emission_col[0], emission_col[1], emission_col[2] };
+        }
+        scene_dirty = true;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Hue of the glow. The Emissive slider above is its\n"
+                          "brightness - a grey lamp with a warm bulb is the two\n"
+                          "of these together.");
+    }
+
+    // --- Surface response ----------------------------------------------------
+    //
+    // These four already drive the lighting shader - the geometry pass has carried
+    // them per draw for a long time - but there was no way to set them from the
+    // editor, so every object in every scene shipped with them at their defaults.
+    // Each writes to the whole selection, like the sliders above.
+    //
+    // Every control here is bound to state the rasteriser actually reads. Anything
+    // that would only affect the path tracer, or nothing at all, is deliberately
+    // not offered rather than presented as a slider that does nothing.
+    if (ImGui::CollapsingHeader("Coating & Cloth", ImGuiTreeNodeFlags_DefaultOpen)) {
+        // Applies the edit to every selected actor, and marks the scene dirty. The
+        // pattern repeats for each parameter, so it is worth one lambda.
+        const auto apply = [&](float Actor::*field, float value) {
+            for (Actor* actor : selected_actors) actor->*field = value;
+            scene_dirty = true;
+        };
+
+        float clearcoat = primary_actor->clearcoat;
+        if (ImGui::SliderFloat("Clearcoat", &clearcoat, 0.0f, 1.0f, "%.3f")) {
+            apply(&Actor::clearcoat, clearcoat);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("A second specular lobe over the base surface - car paint,\n"
+                              "lacquered wood, varnish. Adds a highlight that stays sharp\n"
+                              "even when the material underneath is rough.");
+        }
+
+        float clearcoat_roughness = primary_actor->clearcoat_roughness;
+        if (ImGui::SliderFloat("Clearcoat Roughness", &clearcoat_roughness, 0.0f, 1.0f, "%.3f")) {
+            apply(&Actor::clearcoat_roughness, clearcoat_roughness);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("How polished the coat itself is. Low is a mirror finish;\n"
+                              "high is the soft sheen of a worn or brushed lacquer.");
+        }
+
+        float sheen = primary_actor->sheen;
+        if (ImGui::SliderFloat("Sheen", &sheen, 0.0f, 1.0f, "%.3f")) {
+            apply(&Actor::sheen, sheen);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Retroreflection at grazing angles - the bright rim cloth\n"
+                              "picks up along a silhouette. Velvet, felt, brushed fabric.");
+        }
+
+        float subsurface = primary_actor->subsurface;
+        if (ImGui::SliderFloat("Subsurface", &subsurface, 0.0f, 1.0f, "%.3f")) {
+            apply(&Actor::subsurface, subsurface);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Light entering the surface and scattering back out.\n"
+                              "Skin, wax, marble, leaves held against the sun.");
+        }
+
+        float specular_tint = primary_actor->specular_tint;
+        if (ImGui::SliderFloat("Specular Tint", &specular_tint, 0.0f, 1.0f, "%.3f")) {
+            apply(&Actor::specular_tint, specular_tint);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Pulls the specular highlight toward the albedo's hue.\n"
+                              "A pure dielectric reflects white; varnish over red wood\n"
+                              "throws a faintly warm highlight. No effect on metal,\n"
+                              "which takes its specular colour from albedo anyway.");
+        }
+
+        float normal_strength = primary_actor->normal_strength;
+        if (ImGui::SliderFloat("Normal Strength", &normal_strength, 0.0f, 4.0f, "%.2f")) {
+            apply(&Actor::normal_strength, normal_strength);
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Scales the normal map's detail. 0 is the bare geometric\n"
+                              "surface, 1 is the map as authored, above that exaggerates.\n"
+                              "Only does anything on a mesh that found a normal map -\n"
+                              "one named after its albedo with a _normal suffix.");
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        if (ImGui::Button("Reset Surface", ImVec2(-FLT_MIN, 0.0f))) {
+            for (Actor* actor : selected_actors) {
+                actor->clearcoat = 0.0f;
+                actor->clearcoat_roughness = 0.1f;
+                actor->sheen = 0.0f;
+                actor->subsurface = 0.0f;
+                actor->normal_strength = 1.0f;
+                actor->specular_tint = 0.0f;
+                actor->emission_color = { 1.0f, 1.0f, 1.0f };
+            }
+            scene_dirty = true;
+        }
+
+        // Presets. Getting a convincing material out of five numbers is mostly a
+        // matter of knowing which combination reads as which substance, which is
+        // exactly the knowledge a first-time user does not have yet.
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        ImGui::TextDisabled("Presets");
+        struct SurfacePreset {
+            const char* name;
+            float metallic, roughness, clearcoat, clearcoat_roughness, sheen, subsurface;
+        };
+        static const SurfacePreset presets[] = {
+            { "Plastic",    0.0f, 0.35f, 0.0f,  0.10f, 0.0f, 0.0f },
+            { "Car Paint",  0.1f, 0.35f, 1.0f,  0.03f, 0.0f, 0.0f },
+            { "Polished Metal", 1.0f, 0.10f, 0.0f, 0.10f, 0.0f, 0.0f },
+            { "Brushed Metal",  1.0f, 0.45f, 0.0f, 0.10f, 0.0f, 0.0f },
+            { "Velvet",     0.0f, 0.85f, 0.0f,  0.10f, 1.0f, 0.0f },
+            { "Skin",       0.0f, 0.55f, 0.0f,  0.10f, 0.0f, 0.7f },
+            { "Marble",     0.0f, 0.25f, 0.3f,  0.15f, 0.0f, 0.5f },
+            { "Rubber",     0.0f, 0.95f, 0.0f,  0.10f, 0.0f, 0.0f },
+            { "Varnished Wood", 0.0f, 0.55f, 0.8f, 0.08f, 0.0f, 0.0f },
+        };
+        const float button_width = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        for (int i = 0; i < IM_ARRAYSIZE(presets); ++i) {
+            const SurfacePreset& preset = presets[i];
+            if (ImGui::Button(preset.name, ImVec2(button_width, 0.0f))) {
+                for (Actor* actor : selected_actors) {
+                    actor->metallic = preset.metallic;
+                    actor->roughness = preset.roughness;
+                    actor->clearcoat = preset.clearcoat;
+                    actor->clearcoat_roughness = preset.clearcoat_roughness;
+                    actor->sheen = preset.sheen;
+                    actor->subsurface = preset.subsurface;
+                }
+                scene_dirty = true;
+            }
+            if (i % 2 == 0 && i + 1 < IM_ARRAYSIZE(presets)) ImGui::SameLine();
+        }
+    }
+
     for (auto& comp : primary_actor->get_components()) {
         if (auto light = dynamic_cast<LightComponent*>(comp.get())) {
             ImGui::Dummy(ImVec2(0.0f, 10.0f));
@@ -2020,6 +2790,67 @@ void Editor::draw_properties() {
             } else if (auto spt = dynamic_cast<SpotLightComponent*>(light)) {
                 ImGui::SliderFloat("Inner Angle", &spt->inner_angle, 0.0f, 90.0f);
                 ImGui::SliderFloat("Outer Angle", &spt->outer_angle, 0.0f, 90.0f);
+            }
+        }
+
+        // Camera. Every field on the component drives the projection the game
+        // renders through, and none of them had any UI at all - a camera actor
+        // could be placed but not aimed, framed or ranged without editing the
+        // scene file by hand.
+        if (auto camera = dynamic_cast<CameraComponent*>(comp.get())) {
+            ImGui::Dummy(ImVec2(0.0f, 10.0f));
+            ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "Camera");
+            ImGui::Separator();
+
+            if (ImGui::Checkbox("Active", &camera->is_active)) scene_dirty = true;
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("The camera the game renders through. Turning one on\n"
+                                  "does not turn the others off - the first active one wins.");
+            }
+
+            if (ImGui::SliderFloat("Field of View", &camera->fov, 10.0f, 140.0f, "%.1f deg")) {
+                scene_dirty = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Vertical field of view. ~50-70 reads as natural;\n"
+                                  "above ~100 gives the stretched wide-angle look.");
+            }
+
+            // Dragged rather than slid: the useful range spans four orders of
+            // magnitude, which no linear slider can address usefully.
+            if (ImGui::DragFloat("Near Plane", &camera->near_plane, 0.005f, 0.001f, 10.0f, "%.3f m")) {
+                // Keeping near below far matters: an inverted or degenerate range
+                // makes the projection matrix singular and the view goes black.
+                if (camera->near_plane >= camera->far_plane) {
+                    camera->near_plane = camera->far_plane * 0.5f;
+                }
+                scene_dirty = true;
+            }
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Nearest visible distance. Depth precision is spent\n"
+                                  "mostly just past this plane, so raising it is the\n"
+                                  "cheapest fix for z-fighting in the distance.");
+            }
+
+            if (ImGui::DragFloat("Far Plane", &camera->far_plane, 5.0f, 1.0f, 100000.0f, "%.0f m")) {
+                if (camera->far_plane <= camera->near_plane) {
+                    camera->far_plane = camera->near_plane * 2.0f;
+                }
+                scene_dirty = true;
+            }
+
+            ImGui::TextDisabled("Depth range ratio: %.0f:1", camera->far_plane / std::max(camera->near_plane, 1e-4f));
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("Far divided by near. Past roughly 10000:1 the depth\n"
+                                  "buffer runs out of precision and distant surfaces\n"
+                                  "start to z-fight.");
+            }
+
+            if (ImGui::Button("Reset Camera", ImVec2(-FLT_MIN, 0.0f))) {
+                camera->fov = 45.0f;
+                camera->near_plane = 0.1f;
+                camera->far_plane = 1000.0f;
+                scene_dirty = true;
             }
         }
     }
@@ -2044,9 +2875,52 @@ void Editor::draw_properties() {
             }
             // Say plainly which tiers have a backend, rather than offering a mode
             // that silently does nothing.
-            if (gi == 2 && !Renderer::vxgi_supported) {
-                ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "No voxelization backend;");
-                ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "running SSGI instead.");
+            if (gi == 2 && !active_renderer->vxgi_available) {
+                ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "This driver has no image");
+                ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "load/store; running SSGI.");
+            } else if (gi == 2) {
+                // Grid settings, only once VXGI is both selected and usable.
+                ImGui::SliderFloat("GI Intensity", &active_renderer->vxgi_intensity, 0.0f, 3.0f, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Scales the cone-traced bounce. Physically this is 1;\n"
+                                      "a voxelised scene over-occludes slightly, and this is\n"
+                                      "the trim for that.");
+                }
+
+                static const char* voxel_res_labels[] = { "32", "64", "128", "256" };
+                static const int voxel_res_values[] = { 32, 64, 128, 256 };
+                int voxel_res_index = 2;
+                for (int i = 0; i < 4; ++i) {
+                    if (voxel_res_values[i] == active_renderer->voxel_resolution) voxel_res_index = i;
+                }
+                if (ImGui::Combo("Voxel Grid", &voxel_res_index, voxel_res_labels, 4)) {
+                    active_renderer->voxel_resolution = voxel_res_values[voxel_res_index];
+                    // Reallocates the grid and forces a rebuild on the next frame.
+                    active_renderer->voxel_volume_dirty = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Cubed, so 256 is 16.7M voxels and about eight times\n"
+                                      "the memory and fill cost of 128. Drop this first on a\n"
+                                      "small GPU.");
+                }
+
+                if (ImGui::SliderFloat("Grid Extent", &active_renderer->voxel_world_extent,
+                                       8.0f, 256.0f, "%.0f m")) {
+                    active_renderer->voxel_volume_dirty = true;
+                }
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("World size the grid covers, centred on the camera.\n"
+                                      "Extent divided by grid size is the voxel size, which\n"
+                                      "is the finest detail that can bounce light.");
+                }
+
+                ImGui::TextDisabled("Voxel size: %.3f m",
+                                    active_renderer->voxel_world_extent /
+                                        std::max(active_renderer->voxel_resolution, 1));
+                if (ImGui::Button("Rebuild Voxel Volume", ImVec2(-FLT_MIN, 0.0f))) {
+                    active_renderer->voxel_volume_dirty = true;
+                }
+                ImGui::TextDisabled("Rebuilds when the camera leaves the\nregion, or on demand here.");
             } else if (gi == 3 && !Renderer::hardware_rt_supported) {
                 ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "Needs a Vulkan/DX12 RT");
                 ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f), "device; running SSGI.");
@@ -2058,6 +2932,135 @@ void Editor::draw_properties() {
             if (g_engine) g_engine->bake_static_lighting();
         }
         ImGui::TextDisabled("Bakes every actor marked Static.\nWrites Content/Bakes/.");
+
+        // --- Shadows, fog and post ------------------------------------------
+        //
+        // All of this was already live and tunable in the renderer, and none of it
+        // was reachable without editing a source file and rebuilding. Each control
+        // writes the renderer field directly, so the viewport updates on the frame
+        // the slider moves.
+        //
+        // These are session settings, not scene settings: they live on the renderer
+        // rather than on the sun actor, so they are not written into the .lithium
+        // file. Changing them is for looking at the scene, not for shipping it.
+        if (active_renderer) {
+            Renderer& r = *active_renderer;
+
+            if (ImGui::CollapsingHeader("Shadows")) {
+                static const char* resolutions[] = { "512", "1024", "2048", "4096" };
+                static const int resolution_values[] = { 512, 1024, 2048, 4096 };
+                int resolution_index = 2;
+                for (int i = 0; i < 4; ++i) {
+                    if (resolution_values[i] == r.shadow_map_resolution) resolution_index = i;
+                }
+                if (ImGui::Combo("Resolution", &resolution_index, resolutions, 4)) {
+                    // Reallocates the cascade array on the next frame.
+                    r.shadow_map_resolution = resolution_values[resolution_index];
+                }
+                ImGui::TextDisabled("Per cascade, and there are %d of them.",
+                                    Renderer::shadow_cascade_count());
+
+                ImGui::SliderFloat("Distance", &r.shadow_distance, 20.0f, 1000.0f, "%.0f m");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Furthest a surface can be and still receive a shadow.\n"
+                                      "Raising it spreads the same texels over more world,\n"
+                                      "so near shadows get coarser.");
+                }
+
+                ImGui::SliderFloat("Split Lambda", &r.shadow_split_lambda, 0.0f, 1.0f, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("0 spaces the cascade boundaries evenly, 1 spaces them\n"
+                                      "logarithmically. Even starves the near field; fully\n"
+                                      "logarithmic spends a whole cascade on the first metre.");
+                }
+
+                ImGui::SliderFloat("Cascade Blend", &r.shadow_cascade_blend, 0.0f, 0.5f, "%.3f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Width of the cross-fade at a cascade boundary, as a\n"
+                                      "fraction of the cascade. At 0 the change in texel\n"
+                                      "density draws a visible line across the ground.");
+                }
+
+                ImGui::SliderFloat("Depth Bias", &r.shadow_depth_bias_texels, 0.0f, 8.0f, "%.2f texels");
+                ImGui::SliderFloat("Normal Bias", &r.shadow_normal_bias_texels, 0.0f, 8.0f, "%.2f texels");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Both are in shadow-map texels, not world units - a texel\n"
+                                      "is the only unit that means the same thing in all four\n"
+                                      "cascades. Too little gives acne, too much peter-panning.");
+                }
+
+                ImGui::Checkbox("Debug: tint cascades", &r.debug_shadow_cascades);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Colours each cascade differently so the splits can be\n"
+                                      "seen rather than guessed at.");
+                }
+
+                if (ImGui::Button("Reset Shadows", ImVec2(-FLT_MIN, 0.0f))) {
+                    r.shadow_map_resolution = 2048;
+                    r.shadow_distance = 250.0f;
+                    r.shadow_split_lambda = 0.85f;
+                    r.shadow_cascade_blend = 0.15f;
+                    r.shadow_depth_bias_texels = 1.6f;
+                    r.shadow_normal_bias_texels = 2.2f;
+                    r.debug_shadow_cascades = false;
+                }
+            }
+
+            if (ImGui::CollapsingHeader("Atmosphere & Fog")) {
+                ImGui::SliderFloat("Fog Density", &r.fog_density, 0.0f, 0.2f, "%.4f");
+                ImGui::SliderFloat("Fog Height", &r.fog_height, -100.0f, 200.0f, "%.1f m");
+                ImGui::SliderFloat("Height Falloff", &r.fog_height_falloff, 0.0f, 1.0f, "%.3f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("How quickly the fog thins with altitude. At 0 it fills\n"
+                                      "the world evenly; higher values keep it pooled low.");
+                }
+                if (ImGui::Button("Reset Fog", ImVec2(-FLT_MIN, 0.0f))) {
+                    r.fog_density = 0.018f;
+                    r.fog_height = 0.0f;
+                    r.fog_height_falloff = 0.12f;
+                }
+            }
+
+            if (ImGui::CollapsingHeader("Ambient Occlusion & Reflections")) {
+                ImGui::SliderFloat("AO Strength", &r.ssao_strength, 0.0f, 2.0f, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Contact darkening in creases and where objects meet.\n"
+                                      "Applied to indirect light only, not to the whole image.");
+                }
+                ImGui::Checkbox("Screen-Space Reflections", &r.enable_ssr);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Reflections of what is on screen. Off-screen geometry\n"
+                                      "cannot reflect, so reflections fade toward the edges -\n"
+                                      "that is inherent to the technique, not a bug.");
+                }
+            }
+
+            if (ImGui::CollapsingHeader("Exposure & Presentation")) {
+                ImGui::SliderFloat("Exposure Bias", &r.exposure_bias, 0.1f, 4.0f, "%.2f");
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Multiplies the auto-exposure result. This is the\n"
+                                      "brightness control a viewer actually wants.");
+                }
+                ImGui::Checkbox("Wireframe", &r.wireframe_mode);
+                if (ImGui::Button("Reset Exposure", ImVec2(-FLT_MIN, 0.0f))) {
+                    r.exposure_bias = 1.0f;
+                }
+            }
+
+            if (ImGui::CollapsingHeader("Culling & Performance")) {
+                ImGui::Checkbox("Frustum Culling", &r.enable_frustum_culling);
+                ImGui::Checkbox("Occlusion Culling", &r.enable_occlusion_culling);
+                if (ImGui::IsItemHovered()) {
+                    ImGui::SetTooltip("Skips objects hidden behind others, using the previous\n"
+                                      "frame's queries. Off by default: it costs a query per\n"
+                                      "object and only pays for itself in dense scenes.");
+                }
+                // Read-only counters, so the effect of the two toggles above is
+                // visible rather than having to be taken on faith.
+                ImGui::TextDisabled("Culled last frame: %d frustum, %d occlusion",
+                                    r.culled_by_frustum, r.culled_by_occlusion);
+            }
+        }
 
         ImGui::Dummy(ImVec2(0.0f, 10.0f));
         ImGui::TextColored(ImVec4(0.55f, 0.75f, 1.0f, 1.0f), "Sky / Background");
@@ -2998,6 +4001,120 @@ void Editor::draw_properties() {
                         ImGui::EndTable();
                     }
                 }
+
+                // --- Foot placement ---------------------------------------
+                // Backed by the two-bone solver and the ground trace, so each of
+                // these changes what the legs actually do.
+                ImGui::Dummy(ImVec2(0.0f, 6.0f));
+                if (ImGui::CollapsingHeader("Foot Placement")) {
+                    auto& foot = animator->foot_placement();
+
+                    ImGui::Checkbox("Enabled", &foot.enabled);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Traces the ground under each foot and adjusts the\n"
+                                          "legs onto it, so a character stands on a slope or a\n"
+                                          "stair instead of through it.");
+                    }
+                    if (!animator->has_ground_probe()) {
+                        ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.2f, 1.0f),
+                                           "No ground probe attached.");
+                    }
+
+                    if (!foot.enabled) ImGui::BeginDisabled();
+
+                    ImGui::DragFloat("Trace Up", &foot.trace_up, 0.01f, 0.0f, 3.0f, "%.3f m");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("How far above the animated foot the trace starts.\n"
+                                          "Has to clear the tallest stair riser the character\n"
+                                          "will walk up.");
+                    }
+                    ImGui::DragFloat("Trace Down", &foot.trace_down, 0.01f, 0.0f, 5.0f, "%.3f m");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("How far a foot will reach for ground that has\n"
+                                          "dropped away below it.");
+                    }
+                    ImGui::DragFloat("Foot Height", &foot.foot_height, 0.005f, 0.0f, 0.5f, "%.3f m");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Distance from the foot bone to the sole. At zero the\n"
+                                          "bone origin - an ankle on most rigs - sinks into\n"
+                                          "the floor.");
+                    }
+                    ImGui::DragFloat("Max Pelvis Drop", &foot.max_pelvis_drop, 0.01f, 0.0f, 2.0f, "%.3f m");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("The pelvis only drops, never rises, and never further\n"
+                                          "than this. Unbounded, one bad trace puts the\n"
+                                          "character sitting on the floor.");
+                    }
+                    ImGui::DragFloat("Adjust Half-Life", &foot.adjust_half_life, 0.005f, 0.0f, 1.0f, "%.3f s");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Smoothing on the pelvis drop and each foot offset.\n"
+                                          "Zero is instant, and pops on every stair edge.");
+                    }
+
+                    ImGui::Checkbox("Align To Normal", &foot.align_to_normal);
+                    if (!foot.align_to_normal) ImGui::BeginDisabled();
+                    ImGui::SliderFloat("Max Align", &foot.max_align_degrees, 0.0f, 90.0f, "%.0f deg");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Caps the tilt, so a foot cannot lie flat against a\n"
+                                          "wall the trace happened to catch.");
+                    }
+                    if (!foot.align_to_normal) ImGui::EndDisabled();
+
+                    ImGui::TextDisabled("Pelvis offset: %.3f m", animator->get_pelvis_offset());
+
+                    ImGui::Dummy(ImVec2(0.0f, 4.0f));
+                    if (ImGui::Button("Reset Foot Placement", ImVec2(-FLT_MIN, 0.0f))) {
+                        foot.trace_up = 0.5f;
+                        foot.trace_down = 0.8f;
+                        foot.foot_height = 0.02f;
+                        foot.max_pelvis_drop = 0.5f;
+                        foot.adjust_half_life = 0.08f;
+                        foot.align_to_normal = true;
+                        foot.max_align_degrees = 45.0f;
+                    }
+
+                    if (!foot.enabled) ImGui::EndDisabled();
+                }
+
+                // --- Inverse kinematics -----------------------------------
+                ImGui::Dummy(ImVec2(0.0f, 6.0f));
+                if (ImGui::CollapsingHeader("Inverse Kinematics")) {
+                    const int ik_count = animator->get_ik_count();
+                    if (ik_count == 0) {
+                        ImGui::TextDisabled("No IK chains on this skeleton.");
+                    }
+                    for (int handle = 0; handle < ik_count; ++handle) {
+                        ImGui::PushID(handle);
+
+                        int ik_root = -1, ik_mid = -1, ik_end = -1;
+                        animator->get_ik_bones(handle, ik_root, ik_mid, ik_end);
+
+                        bool ik_on = animator->is_ik_enabled(handle);
+                        if (ImGui::Checkbox("##ik_enabled", &ik_on)) {
+                            animator->set_ik_enabled(handle, ik_on);
+                        }
+                        ImGui::SameLine();
+                        ImGui::Text("Chain %d", handle);
+                        ImGui::SameLine();
+                        // The three bones it resolved to, so a chain pointed at the
+                        // wrong bone is visible rather than just not working.
+                        ImGui::TextDisabled("(bones %d / %d / %d)", ik_root, ik_mid, ik_end);
+
+                        if (!ik_on) ImGui::BeginDisabled();
+                        float ik_weight = animator->get_ik_weight(handle);
+                        if (ImGui::SliderFloat("Weight", &ik_weight, 0.0f, 1.0f, "%.2f")) {
+                            animator->set_ik_weight(handle, ik_weight);
+                        }
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("Blends between the animated pose at 0 and the\n"
+                                              "fully solved one at 1.");
+                        }
+                        if (!ik_on) ImGui::EndDisabled();
+
+                        ImGui::Separator();
+                        ImGui::PopID();
+                    }
+                }
             }
         }
     }
@@ -3451,14 +4568,7 @@ void Editor::draw_content_browser(Renderer* renderer) {
         // Double click = open
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
             if (ext == ".cminus" || ext == ".lua" || ext == ".vshader") {
-                editing_file_path = filepath;
-                std::ifstream file(editing_file_path);
-                if (file.is_open()) {
-                    std::stringstream buffer;
-                    buffer << file.rdbuf();
-                    editing_file_content = buffer.str();
-                    show_script_editor = true;
-                }
+                open_script_file(filepath);
             } else if (ext == ".material") {
                 editing_file_path = filepath;
                 show_material_editor = true;
@@ -3473,23 +4583,51 @@ void Editor::draw_content_browser(Renderer* renderer) {
             selected_content_file = filepath;
             if (ImGui::Selectable("Open")) {
                 if (ext == ".cminus" || ext == ".lua" || ext == ".vshader") {
-                    editing_file_path = filepath;
-                    std::ifstream file(editing_file_path);
-                    if (file.is_open()) {
-                        std::stringstream buffer; buffer << file.rdbuf();
-                        editing_file_content = buffer.str();
-                        show_script_editor = true;
-                    }
+                    open_script_file(filepath);
                 } else if (ext == ".material") {
                     editing_file_path = filepath;
                     show_material_editor = true;
                     if (active_material) active_material->load_from_file(filepath);
                 }
             }
+            // Always offered, whichever editor is preferred: someone using the
+            // built-in editor still occasionally wants the real one, and vice versa.
+            if (ext == ".cminus" || ext == ".lua" || ext == ".vshader" ||
+                ext == ".cpp" || ext == ".h" || ext == ".hpp" || ext == ".material") {
+                if (ImGui::Selectable("Open in External Editor")) {
+                    // With the built-in editor preferred there is no external one
+                    // configured, so this falls back to the desktop's handler.
+                    const int index = (external_editor_index == ExternalEditor::kBuiltIn)
+                        ? ExternalEditor::kSystemDefault
+                        : external_editor_index;
+                    ExternalEditor::open_file(index, external_editor_command, filepath, 0);
+                }
+            }
             if (ImGui::Selectable("Rename")) {
                 rename_mode = true;
                 strncpy(rename_buf, filename.c_str(), sizeof(rename_buf));
                 rename_buf[sizeof(rename_buf) - 1] = '\0';
+            }
+            if (ImGui::Selectable("Duplicate")) {
+                // The number goes before the extension, not after it: "Rock (1).mesh"
+                // is still a mesh, "Rock.mesh (1)" is a file nothing will open.
+                const std::filesystem::path source(filepath);
+                const std::string stem = source.stem().string();
+                const std::string extension = source.extension().string();
+                const std::filesystem::path directory = source.parent_path();
+
+                const std::string chosen = unique_name(stem,
+                    [&directory, &extension](const std::string& candidate) {
+                        std::error_code probe;
+                        return std::filesystem::exists(directory / (candidate + extension), probe);
+                    });
+
+                std::error_code ec;
+                std::filesystem::copy_file(source, directory / (chosen + extension), ec);
+                if (ec) {
+                    std::cerr << "[Editor] Could not duplicate " << filepath << ": "
+                              << ec.message() << std::endl;
+                }
             }
             if (ImGui::Selectable("Delete")) {
                 std::filesystem::remove(filepath);
@@ -3636,13 +4774,34 @@ void Editor::draw_content_browser(Renderer* renderer) {
                 new_name.end());
             if (!new_name.empty()) {
                 std::filesystem::path p(selected_content_file);
-                std::string new_path = p.parent_path().string() + "/" + new_name;
+                const std::filesystem::path directory = p.parent_path();
+
+                // Renaming onto an existing file would overwrite it silently and
+                // destroy an asset, so the same " (N)" convention used for
+                // duplicates resolves the collision instead.
+                const std::filesystem::path wanted(new_name);
+                const std::string stem = wanted.stem().string();
+                const std::string extension = wanted.extension().string();
+                const std::string chosen = unique_name(stem,
+                    [&directory, &extension, this](const std::string& candidate) {
+                        const std::filesystem::path probe_path =
+                            directory / (candidate + extension);
+                        // The file's own current name is not a collision.
+                        if (probe_path.string() == selected_content_file) return false;
+                        std::error_code probe;
+                        return std::filesystem::exists(probe_path, probe);
+                    });
+
+                const std::string new_path = (directory / (chosen + extension)).string();
                 if (new_path != selected_content_file) {
                     std::error_code ec;
                     std::filesystem::rename(selected_content_file, new_path, ec);
                     if (!ec) {
                         if (editing_file_path == selected_content_file) editing_file_path = new_path;
                         selected_content_file = new_path;
+                    } else {
+                        std::cerr << "[Editor] Could not rename " << selected_content_file
+                                  << ": " << ec.message() << std::endl;
                     }
                 }
             }
@@ -4602,4 +5761,204 @@ void Editor::draw_spawner(std::vector<std::shared_ptr<Actor>>& actors) {
     if (ImGui::Button("Spawn Sphere", ImVec2(-FLT_MIN, 25.0f))) {
         do_spawn("Sphere");
     }
+}
+
+// =============================================================================
+//  Preferences
+//
+//  Currently just the code editor, kept in its own file beside the executable
+//  rather than in the scene: which editor someone uses is a property of their
+//  machine, not of the project, and committing it would have every collaborator
+//  fighting over it.
+// =============================================================================
+
+static std::filesystem::path preferences_path() {
+    return Platform::executable_dir() / "editor_prefs.json";
+}
+
+void Editor::load_preferences() {
+    std::ifstream file(preferences_path());
+    if (!file.is_open()) return;   // no file yet is the normal first-run case
+
+    try {
+        nlohmann::json prefs;
+        file >> prefs;
+        external_editor_index = prefs.value("external_editor_index", 0);
+        const std::string command = prefs.value("external_editor_command", std::string());
+        std::snprintf(external_editor_command, sizeof(external_editor_command), "%s", command.c_str());
+    } catch (const std::exception& e) {
+        // A corrupt preferences file must not stop the editor starting. Defaults
+        // are always usable, and the file is rewritten on the next change.
+        std::cerr << "[Editor] Ignoring unreadable preferences: " << e.what() << std::endl;
+    }
+}
+
+void Editor::save_preferences() const {
+    nlohmann::json prefs;
+    prefs["external_editor_index"] = external_editor_index;
+    prefs["external_editor_command"] = std::string(external_editor_command);
+
+    std::ofstream file(preferences_path());
+    if (!file.is_open()) return;
+    file << prefs.dump(2) << std::endl;
+}
+
+void Editor::open_script_file(const std::string& path, int line) {
+    // The built-in editor is not a launch at all - it reads the file into the
+    // in-engine buffer, which is the behaviour this always had.
+    if (external_editor_index == ExternalEditor::kBuiltIn) {
+        editing_file_path = path;
+        std::ifstream file(path);
+        if (file.is_open()) {
+            std::stringstream buffer;
+            buffer << file.rdbuf();
+            editing_file_content = buffer.str();
+            show_script_editor = true;
+        }
+        return;
+    }
+
+    if (ExternalEditor::open_file(external_editor_index, external_editor_command, path, line)) {
+        return;
+    }
+
+    // The configured editor could not be launched - uninstalled since it was
+    // chosen, or a custom command that does not resolve. Falling back to the
+    // built-in editor means the file still opens, which is what the user asked
+    // for; saying so means they can go fix the setting.
+    std::cerr << "[Editor] Could not launch the configured external editor; "
+                 "opening in the built-in editor instead." << std::endl;
+    editing_file_path = path;
+    std::ifstream file(path);
+    if (file.is_open()) {
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        editing_file_content = buffer.str();
+        show_script_editor = true;
+    }
+}
+
+void Editor::draw_preferences() {
+    if (!show_preferences) return;
+
+    ImGui::SetNextWindowSize(ImVec2(520.0f, 0.0f), ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Preferences", &show_preferences)) {
+        ImGui::End();
+        return;
+    }
+
+    ImGui::TextColored(ImVec4(0.85f, 0.45f, 0.0f, 1.0f), "Script Editor");
+    ImGui::Separator();
+    ImGui::TextWrapped("Which editor opens a script when you double-click it in the "
+                       "Content Browser.");
+    ImGui::Dummy(ImVec2(0.0f, 6.0f));
+
+    const std::vector<ExternalEditor::Definition>& editors = ExternalEditor::registry();
+
+    // Which of them are actually installed. Probed once and cached: this walks PATH
+    // for every candidate of every editor, which is far too much to redo per frame.
+    static std::vector<std::string> resolved;
+    static bool probed = false;
+    if (!probed) {
+        probed = true;
+        resolved.reserve(editors.size());
+        for (const ExternalEditor::Definition& definition : editors) {
+            resolved.push_back(ExternalEditor::resolve_executable(definition));
+        }
+    }
+
+    const int custom_index = static_cast<int>(editors.size());
+    const char* preview = (external_editor_index >= 0 && external_editor_index < custom_index)
+        ? editors[static_cast<size_t>(external_editor_index)].display_name
+        : "Custom command";
+
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    if (ImGui::BeginCombo("##external_editor", preview)) {
+        for (int i = 0; i < custom_index; ++i) {
+            const ExternalEditor::Definition& definition = editors[static_cast<size_t>(i)];
+            // The built-in editor and the system handler are always available; the
+            // rest are only selectable if they were actually found.
+            const bool always_available = (i == ExternalEditor::kBuiltIn ||
+                                           i == ExternalEditor::kSystemDefault);
+            const bool installed = always_available || !resolved[static_cast<size_t>(i)].empty();
+
+            // Editors that are not installed are listed but disabled, rather than
+            // hidden. Seeing "Visual Studio Code (not found)" tells you the engine
+            // supports it and you have not installed it; an absent row tells you
+            // nothing at all.
+            if (!installed) ImGui::BeginDisabled();
+            const bool selected = (external_editor_index == i);
+            std::string label = definition.display_name;
+            if (!always_available) {
+                label += installed ? ("  [" + resolved[static_cast<size_t>(i)] + "]")
+                                   : "  (not found)";
+            }
+            if (ImGui::Selectable(label.c_str(), selected) && installed) {
+                external_editor_index = i;
+                save_preferences();
+            }
+            if (selected) ImGui::SetItemDefaultFocus();
+            if (!installed) ImGui::EndDisabled();
+        }
+
+        const bool custom_selected = (external_editor_index >= custom_index);
+        if (ImGui::Selectable("Custom command...", custom_selected)) {
+            external_editor_index = custom_index;
+            save_preferences();
+        }
+        ImGui::EndCombo();
+    }
+
+    if (external_editor_index >= custom_index) {
+        ImGui::Dummy(ImVec2(0.0f, 6.0f));
+        ImGui::TextWrapped("Command to run. {file} is the script's absolute path and "
+                           "{line} the line number. An argument containing {line} is "
+                           "dropped when no line is known, and {file} is appended if "
+                           "you do not mention it.");
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::InputText("##custom_editor_command", external_editor_command,
+                             sizeof(external_editor_command))) {
+            save_preferences();
+        }
+        ImGui::TextDisabled("Examples:");
+        ImGui::TextDisabled("  code --goto {file}:{line}");
+        ImGui::TextDisabled("  emacsclient +{line} {file}");
+        ImGui::TextDisabled("  /opt/myeditor/bin/edit {file}");
+        // No shell is involved, which is worth saying: people reach for pipes and
+        // && here, and they will not work.
+        ImGui::TextDisabled("Run directly, not through a shell - no pipes or &&.");
+    }
+
+    if (external_editor_index != ExternalEditor::kBuiltIn) {
+        ImGui::Dummy(ImVec2(0.0f, 8.0f));
+        ImGui::Separator();
+        ImGui::TextWrapped("Scripts open outside the engine. Edits are picked up by "
+                           "the hot-reload watcher when you save.");
+
+        ImGui::Dummy(ImVec2(0.0f, 4.0f));
+        // Proving it works before the user needs it to is worth a button: a wrong
+        // custom command otherwise only reveals itself the first time they
+        // double-click a script and nothing happens.
+        if (ImGui::Button("Test (open this preferences file)", ImVec2(-FLT_MIN, 0.0f))) {
+            const std::string test_target = preferences_path().string();
+            if (!ExternalEditor::open_file(external_editor_index, external_editor_command,
+                                           test_target, 1)) {
+                preferences_test_message = "Could not launch that editor.";
+            } else {
+                preferences_test_message = "Launched. If nothing opened, check the command.";
+            }
+        }
+        if (!preferences_test_message.empty()) {
+            ImGui::TextWrapped("%s", preferences_test_message.c_str());
+        }
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, 8.0f));
+    ImGui::Separator();
+    if (ImGui::Button("Re-scan for editors", ImVec2(-FLT_MIN, 0.0f))) {
+        // For the case where someone installs their editor while the engine is up.
+        probed = false;
+    }
+
+    ImGui::End();
 }

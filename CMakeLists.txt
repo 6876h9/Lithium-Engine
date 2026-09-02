@@ -105,6 +105,9 @@ set(SOURCES
     src/world/sprite_actor.cpp
     src/world/camera_component.cpp
     src/scripting/cminus_interpreter.cpp
+    src/scripting/cminus_builtins.cpp
+    src/core/material_graph.cpp
+    src/core/external_editor.cpp
     src/scripting/lua_api.cpp
     src/world/lua_script_component.cpp
     src/audio/miniaudio_impl.cpp

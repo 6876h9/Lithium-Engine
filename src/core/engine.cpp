@@ -633,6 +633,9 @@ void Engine::populate_render_state(RenderState& state) {
                 cmd.clearcoat_roughness = actor->clearcoat_roughness;
                 cmd.sheen = actor->sheen;
                 cmd.subsurface = actor->subsurface;
+                cmd.normal_strength = actor->normal_strength;
+                cmd.emission_color = actor->emission_color;
+                cmd.specular_tint = actor->specular_tint;
                 // Baked bounce is added to emission because the lighting pass evaluates
                 // it as albedo * emissive - the same albedo-modulated form indirect
                 // diffuse light takes - and the G-buffer has no spare channel for a
@@ -813,14 +816,41 @@ void Engine::process_input() {
             if (event.type == SDL_MOUSEBUTTONDOWN) {
                 if (event.button.button == SDL_BUTTON_RIGHT) {
                     is_rmb_down = true;
+
+                    // Relative mouse mode requires the window to hold input focus.
+                    // A right-click that arrives while focus is elsewhere - the very
+                    // first click back into the editor, or a click-through from
+                    // another window - is delivered to us but leaves focus unset, so
+                    // SDL refuses relative mode and no motion deltas ever arrive.
+                    // That is the "right-drag does nothing until you click the
+                    // Outliner first" bug: the Outliner click is what took focus.
+                    // Take focus explicitly here instead of relying on a prior click.
+                    SDL_Window* sdl_window = window ? window->get_sdl_window() : nullptr;
+                    if (sdl_window &&
+                        !(SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_INPUT_FOCUS)) {
+                        SDL_RaiseWindow(sdl_window);
+                        SDL_SetWindowInputFocus(sdl_window);
+                    }
+
                     int rel_ok = SDL_SetRelativeMouseMode(SDL_TRUE);
+                    // SDL_SetWindowInputFocus is a request to the window manager, and
+                    // on some compositors it is asynchronous or outright ignored, so
+                    // relative mode can still be refused right here. Rather than lose
+                    // the drag, fall back to integrating absolute cursor deltas by
+                    // hand from this frame's cursor position.
+                    rmb_relative_fallback = (rel_ok != 0);
+                    if (rmb_relative_fallback) {
+                        SDL_GetMouseState(&rmb_last_mouse_x, &rmb_last_mouse_y);
+                    }
                     if (input_debug_enabled())
                         std::cerr << "[input] RMB down, SDL_SetRelativeMouseMode=" << rel_ok
-                                  << " (" << (rel_ok ? SDL_GetError() : "ok") << ")" << std::endl;
+                                  << " (" << (rel_ok ? SDL_GetError() : "ok") << ")"
+                                  << " fallback=" << rmb_relative_fallback << std::endl;
                 }
             } else if (event.type == SDL_MOUSEBUTTONUP) {
                 if (event.button.button == SDL_BUTTON_RIGHT) {
                     is_rmb_down = false;
+                    rmb_relative_fallback = false;
                     SDL_SetRelativeMouseMode(SDL_FALSE);
                 }
             } else if (event.type == SDL_MOUSEMOTION) {
@@ -830,15 +860,36 @@ void Engine::process_input() {
                               << " relmode=" << (SDL_GetRelativeMouseMode() ? 1 : 0)
                               << " yaw=" << camera_rot.y << std::endl;
                 if (is_rmb_down) {
+                    // With relative mode active SDL supplies the deltas directly.
+                    // When it was refused (see the RMB-down handler) xrel/yrel are
+                    // still populated but the cursor is not warped or confined, so
+                    // track the absolute position ourselves and difference it.
+                    int dx = event.motion.xrel;
+                    int dy = event.motion.yrel;
+                    if (rmb_relative_fallback) {
+                        dx = event.motion.x - rmb_last_mouse_x;
+                        dy = event.motion.y - rmb_last_mouse_y;
+                        rmb_last_mouse_x = event.motion.x;
+                        rmb_last_mouse_y = event.motion.y;
+                        // A late-arriving focus grant is the common case on X11 and
+                        // Wayland: retry once focus exists so the rest of the drag
+                        // gets proper confined relative motion.
+                        SDL_Window* sdl_window = window ? window->get_sdl_window() : nullptr;
+                        if (sdl_window &&
+                            (SDL_GetWindowFlags(sdl_window) & SDL_WINDOW_INPUT_FOCUS) &&
+                            SDL_SetRelativeMouseMode(SDL_TRUE) == 0) {
+                            rmb_relative_fallback = false;
+                        }
+                    }
                     if (active_config.is_2d_mode) {
                         float pan_speed = ortho_zoom * 0.002f;
-                        camera_pos.x -= event.motion.xrel * pan_speed;
-                        camera_pos.y += event.motion.yrel * pan_speed;
+                        camera_pos.x -= dx * pan_speed;
+                        camera_pos.y += dy * pan_speed;
                         camera_rot.x = 0; camera_rot.y = 0;
                     } else {
                         float sensitivity = 0.003f;
-                        camera_rot.y -= event.motion.xrel * sensitivity;
-                        camera_rot.x -= event.motion.yrel * sensitivity;
+                        camera_rot.y -= dx * sensitivity;
+                        camera_rot.x -= dy * sensitivity;
 
                         // Clamp pitch
                         if (camera_rot.x > 1.4f) camera_rot.x = 1.4f;
@@ -1962,21 +2013,53 @@ void Engine::render(RenderState& state, float render_delta_time) {
         // 1. Shadow Pass (for simulated ray tracing shadows)
         if (!enable_tesla) {
             ScopedGpuPass _shadow(renderer->profiler, RenderProfiler::Shadow);
-            renderer->begin_shadow_pass();
-            for (auto& cmd : state.meshes) {
-                if (!cmd.is_invisible) {
+            // Once per cascade, not once per frame. Each cascade is a separate layer
+            // of the depth array fitted to its own slice of the view frustum, so the
+            // caster set has to be drawn into each of them; filling only the first
+            // leaves every layer past it cleared, which reads as "nothing occludes
+            // anything" and silently drops all shadows beyond the near slice.
+            for (int cascade = 0; cascade < Renderer::shadow_cascade_count(); ++cascade) {
+                renderer->begin_shadow_pass(cascade);
+                for (auto& cmd : state.meshes) {
+                    if (cmd.is_invisible) continue;
+                    // Skip casters that cannot reach this cascade's volume. Cascade 3
+                    // covers a huge area, so without this every small prop in the
+                    // scene is redrawn into all four layers for nothing.
+                    if (cmd.has_bounds) {
+                        const Vector3 relative_center =
+                            (DVector3{ static_cast<double>(cmd.bounds_center_world.x),
+                                       static_cast<double>(cmd.bounds_center_world.y),
+                                       static_cast<double>(cmd.bounds_center_world.z) }
+                             - state.camera_pos).to_vec3();
+                        if (!renderer->cascade_accepts_caster(relative_center,
+                                                              cmd.bounds_radius_world)) {
+                            continue;
+                        }
+                    }
                     renderer->render_mesh_shadow(*cmd.mesh, cmd.transform, &cmd.bone_matrices,
                                                  cmd.lod_mesh.get());
                 }
-            }
-            for (auto& cmd : state.terrains) {
-                if (!cmd.terrain) continue;
-                renderer->render_terrain_shadow(*cmd.terrain, cmd.transform);
-                if (auto foliage = cmd.terrain->get_foliage_mesh()) {
-                    renderer->render_foliage_shadow(*cmd.terrain, *foliage, cmd.transform);
+                for (auto& cmd : state.terrains) {
+                    if (!cmd.terrain) continue;
+                    renderer->render_terrain_shadow(*cmd.terrain, cmd.transform);
+                    if (auto foliage = cmd.terrain->get_foliage_mesh()) {
+                        renderer->render_foliage_shadow(*cmd.terrain, *foliage, cmd.transform);
+                    }
                 }
+                renderer->end_shadow_pass();
             }
-            renderer->end_shadow_pass();
+        }
+
+        // 1b. Voxelisation, for VXGI. Returns false unless the mode is VXGI, the
+        // driver supports it, and the existing volume has gone stale - so on almost
+        // every frame this costs one comparison and nothing is drawn.
+        if (!enable_tesla && renderer->begin_voxel_pass()) {
+            for (auto& cmd : state.meshes) {
+                if (cmd.is_invisible) continue;
+                renderer->render_mesh_voxel(*cmd.mesh, cmd.transform, cmd.color, cmd.emissive,
+                                            &cmd.bone_matrices, cmd.lod_mesh.get());
+            }
+            renderer->end_voxel_pass();
         }
 
         if (enable_tesla) {
@@ -2027,6 +2110,7 @@ void Engine::render(RenderState& state, float render_delta_time) {
                     renderer->set_ambient_cube(cmd.ambient_cube);
                     renderer->render_mesh(*cmd.mesh, cmd.transform, cmd.color, cmd.metallic, cmd.roughness,
                                            cmd.clearcoat, cmd.clearcoat_roughness, cmd.sheen, cmd.subsurface, cmd.emissive,
+                                           cmd.normal_strength, cmd.emission_color, cmd.specular_tint,
                                            cmd.is_invisible, cmd.is_selected, &cmd.bone_matrices,
                                            cmd.lod_mesh.get(), cmd.custom_shader.get(),
                                            &cmd.custom_shader_values);

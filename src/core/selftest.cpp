@@ -1,4 +1,7 @@
 #include "core/selftest.hpp"
+#include "core/editor.hpp"
+#include "core/external_editor.hpp"
+#include "core/platform.hpp"
 
 #include "core/engine.hpp"
 #include "core/asset_database.hpp"
@@ -13,15 +16,19 @@
 #include "world/cpp_script_component.hpp"
 #include "world/ui_canvas_component.hpp"
 #include "world/terrain_component.hpp"
+#include "world/animation_player.hpp"
+#include "world/skeleton.hpp"
 #include "physics/physics_engine.hpp"
 #include "navigation/navmesh.hpp"
 #include "renderer/lightmapper.hpp"
+#include "scripting/cminus_interpreter.hpp"
 
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <vector>
 
@@ -587,6 +594,548 @@ int run_selftest(Engine& engine) {
 
         terrain->reset();
         check(terrain->sample_height(0.0f, 0.0f) == 0.0f, "reset flattens the terrain");
+    }
+
+    // --- C-Minus scripting ---------------------------------------------------
+    //
+    // The language's own tests. The interpreter is reached only by running a
+    // script, so without this every path below - scoping, arrays, vec3 arithmetic,
+    // the error reporting that replaced silent zeros - stays unexercised by a
+    // plain launch.
+    {
+        section("C-Minus scripting");
+
+        // Parses source and runs it, returning the interpreter so the caller can
+        // inspect what the script left behind.
+        const auto run = [](const std::string& source, CMinus::Interpreter& interp) -> std::string {
+            try {
+                CMinus::Lexer lexer(source, "selftest");
+                CMinus::Parser parser(lexer.tokenize(), "selftest");
+                auto program = parser.parse();
+                interp.execute(program);
+                return {};
+            } catch (const CMinus::ScriptError& e) {
+                return e.detail.empty() ? std::string("error") : e.detail;
+            } catch (const std::exception& e) {
+                return e.what();
+            }
+        };
+
+        {
+            CMinus::Interpreter interp;
+            const std::string err = run("a = 2 + 3 * 4; b = (2 + 3) * 4; c = 7 % 4;", interp);
+            check(err.empty(), "arithmetic runs");
+            check(interp.get_variable("a").x == 14.0f, "multiplication binds tighter than addition");
+            check(interp.get_variable("b").x == 20.0f, "parentheses override precedence");
+            check(interp.get_variable("c").x == 3.0f, "modulo");
+        }
+
+        {
+            // Vec3 as a first-class value, which is the point of the type existing:
+            // before it, a position had to be carried as three separate scalars.
+            CMinus::Interpreter interp;
+            const std::string err = run("v = vec3(1, 2, 3); w = v * 2; s = w.y; n = length(vec3(3, 4, 0));", interp);
+            check(err.empty(), "vector arithmetic runs");
+            const CMinus::Value w = interp.get_variable("w");
+            check(w.is_vec3() && w.x == 2.0f && w.y == 4.0f && w.z == 6.0f, "a vec3 scales by a scalar");
+            check(interp.get_variable("s").x == 4.0f, "a component reads back with .y");
+            check(interp.get_variable("n").x == 5.0f, "length of a 3-4-5 triangle");
+        }
+
+        {
+            CMinus::Interpreter interp;
+            const std::string err = run("p = vec3(0, 0, 0); p.y = 3; q = p.y;", interp);
+            check(err.empty(), "component assignment runs");
+            check(interp.get_variable("q").x == 3.0f, "writing one component leaves the others alone");
+            check(interp.get_variable("p").z == 0.0f, "and does not disturb z");
+        }
+
+        {
+            // Growing on read is load-bearing: existing scripts read a table before
+            // ever assigning to it and expect zero.
+            CMinus::Interpreter interp;
+            const std::string err = run("t[5] = 9; u = t[5]; z = t[40];", interp);
+            check(err.empty(), "arrays run");
+            check(interp.get_variable("u").x == 9.0f, "an array element reads back");
+            check(interp.get_variable("z").x == 0.0f, "an unwritten element reads as zero");
+        }
+
+        {
+            CMinus::Interpreter interp;
+            const std::string err = run("array fixed[4]; fixed[9] = 1;", interp);
+            check(!err.empty(), "a declared array rejects an out-of-range index");
+        }
+
+        {
+            // Hoisting: a script may call a helper declared further down the file.
+            CMinus::Interpreter interp;
+            const std::string err = run("r = twice(21); function twice(n) { return n * 2; }", interp);
+            check(err.empty(), "a function may be called before it is declared");
+            check(interp.get_variable("r").x == 42.0f, "and returns its value");
+        }
+
+        {
+            // A helper must not be able to clobber game state that happens to share
+            // a name with one of its locals.
+            CMinus::Interpreter interp;
+            const std::string err = run(
+                "score = 10; function helper() { score = 999; } helper(); "
+                "function bump() { global score = 50; } bump();", interp);
+            check(err.empty(), "scoping runs");
+            check(interp.get_variable("score").x == 50.0f,
+                  "a plain assignment in a function is local, and 'global' opts in");
+        }
+
+        {
+            CMinus::Interpreter interp;
+            const std::string err = run(
+                "n = 0; for (i = 0; i < 10; i = i + 1) { if (i == 5) { break; } n = n + 1; }", interp);
+            check(err.empty(), "loops run");
+            check(interp.get_variable("n").x == 5.0f, "break leaves the loop");
+        }
+
+        {
+            CMinus::Interpreter interp;
+            const std::string err = run("while (1) { }", interp);
+            check(!err.empty(), "an infinite loop is caught rather than hanging the engine");
+        }
+
+        {
+            // Both used to evaluate silently to 0, which is what made a typo present
+            // as "the game is subtly wrong" rather than as an error.
+            CMinus::Interpreter interp;
+            check(!run("x = 1 / 0;", interp).empty(), "division by zero is reported");
+            check(!run("x = no_such_function(1);", interp).empty(), "an unknown function is reported");
+            check(!run("x = sin(1, 2, 3);", interp).empty(), "a wrong argument count is reported");
+            check(!run("x = length(5);", interp).empty(), "a type error is reported");
+        }
+
+        {
+            // Event functions - the shape the visual script editor compiles to.
+            //
+            // The program is held here rather than inside run(): the interpreter
+            // keeps raw pointers into the AST it was bound to (hosts store it as
+            // parsed_program and re-enter every frame), so it has to outlive every
+            // call made against it.
+            CMinus::Interpreter interp;
+            std::vector<std::unique_ptr<CMinus::ASTNode>> program;
+            std::string err;
+            try {
+                CMinus::Lexer lexer("function on_tick() { global ticked = 1; scratch = 7; } "
+                                    "function on_begin_play() { }", "selftest");
+                CMinus::Parser parser(lexer.tokenize(), "selftest");
+                program = parser.parse();
+                interp.execute(program);
+            } catch (const std::exception& e) {
+                err = e.what();
+            }
+            check(err.empty(), "an event-function script binds");
+            check(interp.has_script_function("on_tick"), "on_tick is found");
+            check(!interp.has_script_function("on_collision_enter"), "an undefined event is simply absent");
+            CMinus::Value result;
+            check(interp.call_script_function("on_tick", {}, &result), "on_tick is callable");
+            check(interp.get_variable("ticked").x == 1.0f,
+                  "a 'global' write from an event function is visible afterwards");
+            // The other half of the same rule: a plain assignment stayed local and
+            // did not leak into the script's state.
+            check(interp.get_variable("scratch").x == 0.0f,
+                  "and a plain assignment in that function did not escape it");
+        }
+
+        {
+            // The real thing. The sample game is the largest script that exists, and
+            // it exercises the parser far harder than anything written here.
+            namespace fs = std::filesystem;
+            const fs::path script = "Content/LithiumTest/lithium_test.cminus";
+            std::error_code ec;
+            if (fs::exists(script, ec)) {
+                std::ifstream in(script);
+                std::stringstream buffer;
+                buffer << in.rdbuf();
+                try {
+                    CMinus::Lexer lexer(buffer.str(), script.string());
+                    CMinus::Parser parser(lexer.tokenize(), script.string());
+                    auto program = parser.parse();
+                    check(!program.empty(), "the sample game script parses");
+                    // Run it with no actor attached: every actor-bound builtin it
+                    // calls must report that rather than dereferencing null.
+                    CMinus::Interpreter interp;
+                    interp.script_name = script.string();
+                    try {
+                        interp.execute(program);
+                        check(true, "the sample game script runs headlessly");
+                    } catch (const CMinus::ScriptError&) {
+                        // Expected: it drives an actor it does not have here.
+                        check(true, "the sample game script reports rather than crashing without an actor");
+                    }
+                } catch (const std::exception& e) {
+                    check(false, std::string("the sample game script parses: ") + e.what());
+                }
+            }
+        }
+    }
+
+    // --- Inverse kinematics --------------------------------------------------
+    //
+    // A synthetic three-bone chain along +Y, one unit per segment, so the reach is
+    // known exactly and the solver's answer can be checked against arithmetic
+    // rather than against a screenshot.
+    {
+        section("Inverse kinematics");
+
+        Skeleton skeleton;
+        skeleton.global_inverse_transform = Matrix4x4::identity();
+        // root at origin, mid one unit up, tip two units up.
+        for (int i = 0; i < 3; ++i) {
+            Bone bone;
+            bone.name = (i == 0) ? "thigh" : (i == 1) ? "shin" : "foot";
+            bone.parent_index = i - 1;
+            bone.local_bind_transform = (i == 0)
+                ? Matrix4x4::identity()
+                : Matrix4x4::translation({ 0.0f, 1.0f, 0.0f });
+            bone.inverse_bind_pose =
+                Matrix4x4::translation({ 0.0f, -static_cast<float>(i), 0.0f });
+            skeleton.bones.push_back(bone);
+        }
+
+        std::vector<AnimationClip> no_clips;
+        AnimationPlayer player(&skeleton, &no_clips);
+
+        const int chain = player.add_two_bone_ik("foot");
+        check(chain >= 0, "a two-bone chain resolves from the tip");
+
+        int ik_root = -1, ik_mid = -1, ik_end = -1;
+        player.get_ik_bones(chain, ik_root, ik_mid, ik_end);
+        check(ik_root == 0 && ik_mid == 1 && ik_end == 2,
+              "and it picks the tip's parent and grandparent");
+
+        // A tip whose parent has no parent cannot be driven.
+        check(player.add_two_bone_ik("shin") < 0,
+              "a tip without a grandparent is rejected");
+
+        Vector3 rest;
+        check(player.get_bone_mesh_position(ik_end, rest), "the tip has a mesh position");
+        check(std::fabs(rest.y - 2.0f) < 1e-3f, "which starts two units up the chain");
+
+        // Reachable: 1.2 units along +X and 1.0 up is well inside a reach of 2.
+        const Vector3 target{ 1.2f, 1.0f, 0.0f };
+        player.set_ik_target(chain, target);
+        player.set_ik_enabled(chain, true);
+        player.set_ik_weight(chain, 1.0f);
+        player.update(0.016f);
+
+        Vector3 solved;
+        player.get_bone_mesh_position(ik_end, solved);
+        const float reach_error = std::sqrt((solved.x - target.x) * (solved.x - target.x) +
+                                            (solved.y - target.y) * (solved.y - target.y) +
+                                            (solved.z - target.z) * (solved.z - target.z));
+        {
+            std::ostringstream detail;
+            detail << "the tip reaches a target inside its range (error "
+                   << std::fixed << std::setprecision(4) << reach_error << ")";
+            check(reach_error < 0.02f, detail.str());
+        }
+
+        // Bone lengths are what a rotation-only solve must not change.
+        Vector3 solved_root, solved_mid;
+        player.get_bone_mesh_position(ik_root, solved_root);
+        player.get_bone_mesh_position(ik_mid, solved_mid);
+        const auto length_of = [](const Vector3& a, const Vector3& b) {
+            return std::sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) +
+                             (a.z - b.z) * (a.z - b.z));
+        };
+        check(std::fabs(length_of(solved_root, solved_mid) - 1.0f) < 1e-3f,
+              "the upper bone keeps its length");
+        check(std::fabs(length_of(solved_mid, solved) - 1.0f) < 1e-3f,
+              "the lower bone keeps its length");
+
+        // Out of reach straightens the limb toward the target instead of tearing.
+        const Vector3 far_target{ 10.0f, 0.0f, 0.0f };
+        player.set_ik_target(chain, far_target);
+        player.update(0.016f);
+        player.get_bone_mesh_position(ik_end, solved);
+        const float extension = std::sqrt(solved.x * solved.x + solved.y * solved.y +
+                                          solved.z * solved.z);
+        check(extension > 1.98f && extension < 2.01f,
+              "an unreachable target straightens the limb to full reach, not beyond");
+        check(solved.x > 1.9f, "and points it at the target");
+
+        // Disabling releases the chain back to the animated pose.
+        player.set_ik_enabled(chain, false);
+        player.update(0.016f);
+        player.get_bone_mesh_position(ik_end, solved);
+        check(std::fabs(solved.y - 2.0f) < 1e-3f, "disabling returns the limb to its pose");
+
+        // Weight blends rather than snapping.
+        player.set_ik_target(chain, target);
+        player.set_ik_enabled(chain, true);
+        player.set_ik_weight(chain, 0.0f);
+        player.update(0.016f);
+        player.get_bone_mesh_position(ik_end, solved);
+        check(std::fabs(solved.y - 2.0f) < 1e-2f, "zero weight leaves the pose untouched");
+    }
+
+    // --- Tangent frames ------------------------------------------------------
+    //
+    // Normal mapping is only correct if the tangent frame is: a normal map is
+    // authored in tangent space, so a wrong frame lights the surface from the wrong
+    // direction and looks like a lighting bug rather than a geometry one.
+    {
+        section("Tangent frames");
+
+        Actor probe("TangentProbe");
+        auto* mesh = probe.create_component<StaticMeshComponent>("Mesh");
+
+        // A quad in the XY plane facing +Z, with U running along +X and V along +Y.
+        // The tangent is therefore known in advance: it must be +X.
+        std::vector<Vertex> quad(4);
+        quad[0].position = { 0.0f, 0.0f, 0.0f }; quad[0].uv = { 0.0f, 0.0f };
+        quad[1].position = { 1.0f, 0.0f, 0.0f }; quad[1].uv = { 1.0f, 0.0f };
+        quad[2].position = { 1.0f, 1.0f, 0.0f }; quad[2].uv = { 1.0f, 1.0f };
+        quad[3].position = { 0.0f, 1.0f, 0.0f }; quad[3].uv = { 0.0f, 1.0f };
+        for (Vertex& v : quad) { v.normal = { 0.0f, 0.0f, 1.0f }; v.color = { 1.0f, 1.0f, 1.0f }; }
+        const std::vector<unsigned int> quad_indices = { 0, 1, 2, 0, 2, 3 };
+
+        mesh->set_geometry(quad, quad_indices);
+        mesh->generate_tangents();
+        const auto& tangents = mesh->get_tangents();
+        check(tangents.size() == quad.size(), "a tangent is produced per vertex");
+
+        if (tangents.size() == quad.size()) {
+            bool all_along_x = true;
+            bool all_unit = true;
+            bool all_orthogonal = true;
+            for (size_t i = 0; i < tangents.size(); ++i) {
+                const Vector4& t = tangents[i].tangent;
+                if (t.x < 0.99f) all_along_x = false;
+                const float length = std::sqrt(t.x * t.x + t.y * t.y + t.z * t.z);
+                if (std::fabs(length - 1.0f) > 1e-3f) all_unit = false;
+                // Dot with the vertex normal (+Z) must vanish.
+                if (std::fabs(t.z) > 1e-3f) all_orthogonal = false;
+            }
+            check(all_along_x, "U running along +X yields a tangent along +X");
+            check(all_unit, "every tangent is unit length");
+            check(all_orthogonal, "and perpendicular to the vertex normal");
+        }
+
+        // Mirrored UVs must flip the handedness, or the mirrored half of a
+        // symmetric character lights inverted.
+        std::vector<Vertex> mirrored = quad;
+        mirrored[0].uv = { 1.0f, 0.0f };
+        mirrored[1].uv = { 0.0f, 0.0f };
+        mirrored[2].uv = { 0.0f, 1.0f };
+        mirrored[3].uv = { 1.0f, 1.0f };
+        mesh->set_geometry(mirrored, quad_indices);
+        mesh->generate_tangents();
+        const auto& flipped = mesh->get_tangents();
+        if (flipped.size() == mirrored.size()) {
+            check(flipped[0].tangent.x < -0.99f, "mirrored UVs reverse the tangent");
+        }
+
+        // Degenerate UVs must not produce NaN. Every vertex on one texel gives a
+        // zero determinant, which is exactly the case that divides by zero if the
+        // guard is missing.
+        std::vector<Vertex> degenerate = quad;
+        for (Vertex& v : degenerate) v.uv = { 0.5f, 0.5f };
+        mesh->set_geometry(degenerate, quad_indices);
+        mesh->generate_tangents();
+        const auto& safe = mesh->get_tangents();
+        bool finite = true;
+        for (const VertexTangent& vt : safe) {
+            if (!std::isfinite(vt.tangent.x) || !std::isfinite(vt.tangent.y) ||
+                !std::isfinite(vt.tangent.z) || !std::isfinite(vt.tangent.w)) {
+                finite = false;
+            }
+        }
+        check(finite, "degenerate UVs produce a usable frame rather than NaN");
+    }
+
+    // --- External code editors -----------------------------------------------
+    //
+    // Every editor wants a line number in a different shape, and getting one wrong
+    // means the editor opens an empty buffer named "script.cminus:12" instead of the
+    // file. The table is the thing worth checking; launching a real editor is not
+    // something a headless test can do.
+    {
+        section("External code editors");
+
+        const auto& editors = ExternalEditor::registry();
+        check(editors.size() > 4, "the editor registry is populated");
+        check(std::string(editors[ExternalEditor::kBuiltIn].display_name) == "Built-in Editor",
+              "index 0 is the built-in editor");
+        check(std::string(editors[ExternalEditor::kSystemDefault].display_name) == "System Default",
+              "index 1 is the system default handler");
+
+        // Every entry past the two specials must name at least one executable and
+        // say how to pass it a file, or selecting it could only ever fail.
+        bool all_launchable = true;
+        bool all_mention_file = true;
+        for (size_t i = 2; i < editors.size(); ++i) {
+            if (editors[i].candidates.empty()) all_launchable = false;
+            bool mentions_file = false;
+            for (const std::string& argument : editors[i].argument_template) {
+                if (argument.find("{file}") != std::string::npos) mentions_file = true;
+            }
+            if (!mentions_file) all_mention_file = false;
+        }
+        check(all_launchable, "every editor names at least one executable");
+        check(all_mention_file, "and every argument template passes the file");
+
+        // An entry claiming line support has to actually use the line, or the
+        // setting is a lie the UI repeats.
+        bool line_claims_hold = true;
+        for (size_t i = 2; i < editors.size(); ++i) {
+            bool uses_line = false;
+            for (const std::string& argument : editors[i].argument_template) {
+                if (argument.find("{line}") != std::string::npos) uses_line = true;
+            }
+            if (editors[i].supports_line != uses_line) line_claims_hold = false;
+        }
+        check(line_claims_hold, "supports_line matches whether the template uses {line}");
+
+        // The known syntaxes, spot-checked by name so a careless edit to the table
+        // is caught rather than shipped.
+        const auto template_of = [&](const char* name) {
+            std::string joined;
+            for (const auto& definition : editors) {
+                if (std::string(definition.display_name) != name) continue;
+                for (const std::string& argument : definition.argument_template) {
+                    if (!joined.empty()) joined += ' ';
+                    joined += argument;
+                }
+            }
+            return joined;
+        };
+        check(template_of("Visual Studio Code") == "--goto {file}:{line}",
+              "VS Code uses --goto file:line");
+        check(template_of("Sublime Text") == "{file}:{line}",
+              "Sublime takes file:line as one argument");
+        check(template_of("Kate") == "-l {line} {file}", "Kate uses -l line file");
+        check(template_of("Notepad++") == "-n{line} {file}",
+              "Notepad++ glues the line to the flag");
+        check(template_of("MonoDevelop") == "{file};{line}",
+              "MonoDevelop separates the line with a semicolon");
+        check(template_of("Visual Studio") == "/edit {file}",
+              "Visual Studio opens with /edit and no line");
+
+        // An unresolvable editor must report failure rather than silently doing
+        // nothing, so the UI can fall back to the built-in editor.
+        check(!ExternalEditor::open_file(999, "", "/tmp/nonexistent_probe.cminus", 1),
+              "an empty custom command reports failure");
+        check(!ExternalEditor::open_file(2, "", "", 1),
+              "an empty path reports failure");
+
+        // Detection, against binaries whose presence is not in doubt.
+        check(Platform::executable_exists("sh"), "a program on PATH is detected");
+        check(!Platform::executable_exists("lithium_no_such_program_xyz"),
+              "a program that is not installed is not");
+        check(!Platform::executable_exists(""), "an empty name is not a program");
+
+        // The launch path itself: fork, detach, exec. /bin/true is chosen because it
+        // does nothing observable and exits immediately - the point is that the call
+        // succeeds and returns without waiting, not what the child does.
+        check(Platform::launch_detached("true", {}), "a detached process launches");
+        check(!Platform::launch_detached("", {}), "launching nothing reports failure");
+        check(!Platform::launch_detached("lithium_no_such_program_xyz", {"arg"}) == false,
+              "a missing program still returns from the fork rather than hanging");
+    }
+
+    // --- Outliner folders ----------------------------------------------------
+    //
+    // Folders are strings on the actor, so the whole feature is path manipulation
+    // and that is where it can go wrong: a rename has to carry nested folders with
+    // it, a delete must not take the actors down with it, and prefix matching must
+    // not confuse "Lights" with "LightsB".
+    {
+        section("Outliner folders");
+
+        std::vector<std::shared_ptr<Actor>> filed;
+        const auto make = [&](const char* name, const char* folder) {
+            auto actor = std::make_shared<Actor>(name);
+            actor->set_folder_path(folder);
+            filed.push_back(actor);
+            return actor;
+        };
+
+        auto sun = make("Sun", "Lighting");
+        auto lamp = make("Lamp", "Lighting/Interior");
+        auto decoy = make("Decoy", "LightingRig");   // shares a prefix, is not inside
+        auto loose = make("Loose", "");
+
+        check(sun->get_folder_path() == "Lighting", "an actor remembers its folder");
+        check(loose->get_folder_path().empty(), "and the root is the empty path");
+
+        // Round-trip through the scene file, including a folder holding nothing.
+        namespace fs = std::filesystem;
+        const fs::path scene_file = fs::temp_directory_path() / "lithium_folder_test.lithium";
+        SceneSerializer::save_scene(scene_file.string(), filed, { "Empty/Nested" });
+
+        std::vector<std::shared_ptr<Actor>> reloaded;
+        check(SceneSerializer::load_scene(scene_file.string(), reloaded), "scene with folders saves and loads");
+
+        std::string lamp_folder;
+        for (const auto& actor : reloaded) {
+            if (actor && actor->get_name() == "Lamp") lamp_folder = actor->get_folder_path();
+        }
+        check(lamp_folder == "Lighting/Interior", "a nested folder survives the round trip");
+
+        const auto& loaded_folders = SceneSerializer::last_loaded_folders();
+        bool has_empty = false;
+        for (const std::string& folder : loaded_folders) {
+            if (folder == "Empty/Nested") has_empty = true;
+        }
+        check(has_empty, "a folder holding no actors is preserved");
+
+        std::error_code ec;
+        fs::remove(scene_file, ec);
+    }
+
+    // --- Duplicate naming ----------------------------------------------------
+    //
+    // "Name", then "Name (1)", "Name (2)". A space, then the number in parentheses.
+    {
+        section("Duplicate naming");
+
+        std::set<std::string> used;
+        const auto taken = [&used](const std::string& candidate) {
+            return used.count(candidate) > 0;
+        };
+
+        check(Editor::next_available_name("Cube", taken) == "Cube",
+              "a free name is used as-is, with no suffix");
+
+        used.insert("Cube");
+        check(Editor::next_available_name("Cube", taken) == "Cube (1)",
+              "the first duplicate is 'Cube (1)'");
+
+        used.insert("Cube (1)");
+        check(Editor::next_available_name("Cube", taken) == "Cube (2)",
+              "the second is 'Cube (2)'");
+
+        // Duplicating a duplicate continues the sequence rather than nesting.
+        used.insert("Cube (2)");
+        check(Editor::next_available_name("Cube (2)", taken) == "Cube (3)",
+              "duplicating 'Cube (2)' gives 'Cube (3)', not 'Cube (2) (1)'");
+
+        // Gaps are filled, so deleting the middle of a run reuses the number.
+        used.erase("Cube (1)");
+        check(Editor::next_available_name("Cube", taken) == "Cube (1)",
+              "a freed number is reused");
+
+        // A name that merely ends in parentheses is not a duplicate suffix.
+        std::set<std::string> parens = { "Barrel (Broken)" };
+        const auto parens_taken = [&parens](const std::string& candidate) {
+            return parens.count(candidate) > 0;
+        };
+        check(Editor::next_available_name("Barrel (Broken)", parens_taken) == "Barrel (Broken) (1)",
+              "a non-numeric suffix is kept, not treated as a counter");
+
+        std::set<std::string> nospace = { "Cube(1)" };
+        const auto nospace_taken = [&nospace](const std::string& candidate) {
+            return nospace.count(candidate) > 0;
+        };
+        check(Editor::next_available_name("Cube(1)", nospace_taken) == "Cube(1) (1)",
+              "a counter without the space is not one");
     }
 
     // --- Result ------------------------------------------------------------

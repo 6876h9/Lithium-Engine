@@ -185,6 +185,10 @@ typedef void (GL_APIENTRY *PFNGLMULTIDRAWELEMENTSINDIRECTPROC)(GLenum mode, GLen
 extern PFNGLUNIFORM1UIPROC glUniform1ui;
 extern PFNGLBINDBUFFERBASEPROC glBindBufferBase;
 extern PFNGLDISPATCHCOMPUTEPROC glDispatchCompute;
+// Voxel cone tracing needs these. Optional for the same reason compute is: the
+// minimum-target Intel part reports a 4.5 context but provides neither.
+extern PFNGLBINDIMAGETEXTUREPROC glBindImageTexture;
+extern PFNGLTEXSTORAGE3DPROC glTexStorage3D;
 extern PFNGLMEMORYBARRIERPROC glMemoryBarrier;
 extern PFNGLMULTIDRAWELEMENTSINDIRECTPROC glMultiDrawElementsIndirect;
 
@@ -205,6 +209,7 @@ extern PFNGLDRAWARRAYSINSTANCEDPROC glDrawArraysInstanced;
 extern PFNGLGETUNIFORMLOCATIONPROC glGetUniformLocation;
 extern PFNGLUNIFORMMATRIX4FVPROC glUniformMatrix4fv;
 extern PFNGLUNIFORM3FVPROC glUniform3fv;
+extern PFNGLUNIFORM1FVPROC glUniform1fv;
 extern PFNGLUNIFORM1IPROC glUniform1i;
 extern PFNGLUNIFORM1FPROC glUniform1f;
 extern PFNGLUNIFORM2FPROC glUniform2f;
@@ -298,6 +303,8 @@ inline bool load_gl_functions() {
     // Intel HD 3000 this is developed on when it is driven through Wine, and every
     // GL 4.2-era driver. Optional, that path simply turns itself off.
     LOAD_PROC_OPTIONAL(PFNGLDISPATCHCOMPUTEPROC, glDispatchCompute);
+    LOAD_PROC_OPTIONAL(PFNGLBINDIMAGETEXTUREPROC, glBindImageTexture);
+    LOAD_PROC_OPTIONAL(PFNGLTEXSTORAGE3DPROC, glTexStorage3D);
     LOAD_PROC_OPTIONAL(PFNGLMEMORYBARRIERPROC, glMemoryBarrier);
     LOAD_PROC_OPTIONAL(PFNGLMULTIDRAWELEMENTSINDIRECTPROC, glMultiDrawElementsIndirect);
 
@@ -313,6 +320,7 @@ inline bool load_gl_functions() {
     LOAD_PROC(PFNGLGETUNIFORMLOCATIONPROC, glGetUniformLocation);
     LOAD_PROC(PFNGLUNIFORMMATRIX4FVPROC, glUniformMatrix4fv);
     LOAD_PROC(PFNGLUNIFORM3FVPROC, glUniform3fv);
+    LOAD_PROC(PFNGLUNIFORM1FVPROC, glUniform1fv);
     LOAD_PROC(PFNGLUNIFORM1IPROC, glUniform1i);
     LOAD_PROC(PFNGLUNIFORM1FPROC, glUniform1f);
     LOAD_PROC(PFNGLUNIFORM2FPROC, glUniform2f);

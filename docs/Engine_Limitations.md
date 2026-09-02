@@ -12,26 +12,44 @@ Single-developer hobby project. No API stability guarantees, no LTS branch, no
 migration tooling between versions. Scene files (`.lithium`) may change format without
 a converter. **Keep backups of anything you care about.**
 
-Platform: **Linux x86-64 only.** No Windows or macOS build.
+Platform: **Linux x86-64**, with a Windows build that runs. No macOS build.
 Graphics: **OpenGL 4.5 only.** There is no Vulkan or DirectX backend.
 
 ---
 
 ## Global illumination — what is real and what is not
 
-The GI dropdown (Sun → Global Illumination) offers four tiers. Two are implemented:
+The GI dropdown (Sun → Global Illumination) offers four modes. Three are implemented;
+the fourth has no backend:
 
 | Mode | Status |
 | --- | --- |
 | **Off / Disabled** | Real. Disables indirect bounce; ambient occlusion stays on. |
 | **Screen-Space GI (SSGI)** | Real. Half-hemisphere stochastic bounce with firefly clamping and a depth-aware blur. |
-| **Voxel Cone Tracing (VXGI)** | **Not implemented.** Selecting it runs SSGI. |
+| **Voxel Cone Tracing (VXGI)** | Real, but **needs hardware this engine's minimum target does not have.** See below. |
 | **Hardware Ray Tracing** | **Not implemented.** Selecting it runs SSGI. |
 
-VXGI needs a scene voxelization pass, a sparse 3D texture and cone marching — a
-subsystem in its own right. Hardware RT needs a Vulkan/DX12 backend that does not
-exist here. Both are wired through the UI and clearly labelled as unavailable in the
-editor; neither silently pretends to work.
+VXGI is implemented: the scene is voxelised into a 3D grid each time the volume goes
+stale, the grid is mip-filtered, and the lighting pass gathers indirect light with six
+cones per pixel. Because a cone walks the grid rather than the screen, it picks up
+light from geometry that is off-screen or hidden — the thing SSGI structurally cannot
+do.
+
+It requires image load/store from a fragment shader. **The minimum-target GPU (Intel
+HD 3000) reports `GL_MAX_FRAGMENT_IMAGE_UNIFORMS = 0`** — it cannot write an image
+from a fragment shader at all, so voxelisation cannot run there. The renderer probes
+that limit at startup and falls back to SSGI with a line saying so:
+
+```
+[Renderer] This GPU allows 0 fragment and 0 compute image uniforms; VXGI needs at
+least 1 and 2. Global Illumination falls back to SSGI.
+```
+
+On hardware that does support it, the editor exposes grid resolution (32–256³),
+world extent, intensity and a manual rebuild.
+
+Hardware RT still needs a Vulkan/DX12 backend that does not exist here. Both modes are
+labelled in the editor; neither silently pretends to work.
 
 ### SSGI is screen-space, with the usual consequences
 
@@ -42,24 +60,17 @@ technique, not a bug.
 
 ---
 
-## Static light baking is per-object, not lightmapped
+## Static light baking
 
-**Rendering → Bake Static Lighting** (also in the Sun's Details panel) computes **one
-irradiance value per actor** marked *Static*, and applies it as albedo-modulated
-bounce.
+**Rendering → Bake Static Lighting** builds a real lightmap: charts are packed into a
+UV atlas, texels are rasterised in texture space, and visibility is traced against a
+BVH over the scene. The bake also fills an irradiance probe grid for anything not
+lightmapped. Results are written to `Content/Bakes/` as `.lmap` files and reloaded
+with the scene.
 
-It is **not** a lightmap pipeline. There is no UV atlas generation, no texel-space
-rasterisation, no lightmap textures. Practical consequences:
-
-- Lighting is uniform across each object. A long wall receives one value, so it cannot
-  be bright at one end and shadowed at the other.
-- Small objects read correctly; large ones read flat.
-- Adding or moving lights requires a re-bake; nothing updates automatically.
-
-Real lightmapping needs per-mesh UV unwrapping (xatlas or equivalent) plus a texture
-cache. That is the honest gap between this and an engine like Unity or Unreal.
-
----
+The remaining limits are the ordinary ones: it is an offline bake, so adding or moving
+a light requires a re-bake, and atlas resolution bounds how fine a shadow the lightmap
+can hold.
 
 ## Object-space visibility and caching
 
@@ -101,21 +112,28 @@ correctness feature.
   the half-float ceiling of 65504, and anything over it became `+Inf`, propagated
   through mip generation, and turned every lit pixel into `NaN`. The clamp is what
   prevents that; it also slightly dims extremely bright suns in reflections.
-- **Shadows are a single map**, not cascaded — one 4096² map fitted to a 40-unit radius
-  around the camera. Objects beyond that receive no shadows.
+- **Shadows are cascaded** — four 2048² layers of a depth array, each fitted to the
+  bounding sphere of its slice of the view frustum, with PCSS filtering and a
+  cross-fade at each boundary. Resolution, distance, split distribution, blend width
+  and both bias terms are exposed in the editor, along with a cascade-tint debug view.
+  Surfaces past the shadow distance (250 units by default) are lit as unoccluded,
+  faded in over the last tenth of the range.
 
 ---
 
 ## Editor bugs currently open
 
-- **Right-click camera movement is unreliable.** Right-drag to look/fly sometimes does
-  not respond until you click something in the Outliner. Not yet fixed.
-- **Rotate gizmo mis-rotates already-rotated objects.** `DecomposeMatrixToComponents`
-  returns Euler angles in ImGuizmo's order, while `Transform` recomposes as
-  `rotZ * rotX * rotY`. Translate and scale are unaffected (they no longer write
-  rotation back), but the rotate gizmo still round-trips through the mismatch.
+None of the previously listed ones. For the record, since they were documented here
+for a long time:
 
----
+- **Right-click camera movement** is fixed. `SDL_SetRelativeMouseMode` requires window
+  input focus, and a right-click arriving while focus was elsewhere was delivered but
+  refused relative mode, so no motion deltas ever arrived — which is why clicking the
+  Outliner first appeared to "fix" it. The engine now takes focus explicitly, and
+  falls back to integrating absolute cursor deltas if the compositor refuses.
+- **The rotate gizmo** is fixed. Write-back goes through `Transform::from_relative_matrix`,
+  an exact inverse of this engine's own `rotZ * rotX * rotY` composition, rather than
+  through ImGuizmo's decomposition in a different Euler order.
 
 ## Performance expectations
 
@@ -125,5 +143,6 @@ renderer is not optimised: SSR, SSGI, PCSS and the bloom pyramid all run at full
 resolution with no dynamic scaling. It will be substantially faster on modern hardware,
 but do not expect the throughput of an engine with a mature render graph.
 
-**Startup is ~4 seconds**, dominated by shader compilation. Compiled program binaries
-are not cached to disk, so every launch pays that cost.
+**Startup is ~1 second** to a ready renderer. Linked program binaries are cached to
+disk via `glGetProgramBinary`, so only the first launch after a shader change pays
+the compilation cost.

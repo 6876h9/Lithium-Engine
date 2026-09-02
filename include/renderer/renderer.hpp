@@ -52,6 +52,52 @@ public:
     // - the shader clamps for that case rather than reading past the array.
     static constexpr int kMaxBones = 128;
 
+    // --- Cascaded shadow map settings ---------------------------------------
+    // Four cascades. This count is not free to change on its own: the lighting
+    // fragment shader declares its cascade arrays at this size and unrolls the
+    // selection over them, so the shader source in renderer.cpp has to move with
+    // it. A static_assert there pins the two together.
+    static constexpr int kShadowCascades = 4;
+
+    // Side length of one cascade layer, in texels. Four 2048 layers cost the same
+    // memory and the same per-frame clear bandwidth as the single 4096 map this
+    // replaced, which matters: the target GPU renders out of system RAM and a
+    // 4096-per-cascade array would spend more time clearing shadow maps than
+    // shading the frame. Changing this reallocates the array on the next frame.
+    int shadow_map_resolution = 2048;
+
+    // Furthest distance from the camera that receives a shadow. Beyond it a
+    // surface is lit as though unoccluded, faded in over the last tenth of the
+    // range so the boundary is not a visible edge.
+    float shadow_distance = 250.0f;
+
+    // Split scheme blend. 0 spaces the cascade boundaries uniformly, 1 spaces them
+    // logarithmically. Uniform starves the near field, pure logarithmic wastes a
+    // whole cascade on the first metre; the practical scheme is a mix, and ~0.85
+    // is the usual answer.
+    float shadow_split_lambda = 0.85f;
+
+    // Fraction of a cascade's own depth span over which it cross-fades into the
+    // next one. Without this the jump in texel density and bias at a boundary
+    // draws a hard line across the ground.
+    float shadow_cascade_blend = 0.15f;
+
+    // Depth and normal-offset bias, expressed in shadow-map texels rather than in
+    // world units or in normalised depth. Texels are the only unit that means the
+    // same thing in all four cascades: cascade 3's texels are ~30x wider than
+    // cascade 0's, so a constant world-space bias is either peter-panning near or
+    // acne far. The shader converts these using each cascade's own metrics.
+    float shadow_depth_bias_texels = 1.6f;
+    float shadow_normal_bias_texels = 2.2f;
+
+    // Tints each cascade a different colour in the lighting pass, so the splits can
+    // be seen rather than guessed at. Defaults from LITHIUM_CSM_DEBUG so a capture
+    // can be driven without a UI.
+    bool debug_shadow_cascades = false;
+
+    // Number of times the caller must draw the caster set. See Engine::render.
+    static constexpr int shadow_cascade_count() { return kShadowCascades; }
+
     Renderer();
     ~Renderer();
 
@@ -94,6 +140,8 @@ public:
     // the component owns; null draws the component's own mesh.
     void render_mesh(const StaticMeshComponent& mesh_component, const Transform& transform, const Vector3& color_override,
                       float metallic, float roughness, float clearcoat, float clearcoat_roughness, float sheen, float subsurface, float emissive,
+                      float normal_strength,
+                      const Vector3& emission_color, float specular_tint,
                       bool is_invisible, bool is_selected = false,
                       const std::vector<Matrix4x4>* bone_matrices = nullptr,
                       const class MeshResource* lod_mesh = nullptr,
@@ -197,6 +245,11 @@ private:
     int metallic_location = -1;
     int roughness_location = -1;
     int has_diffuse_texture_location = -1;
+    int has_normal_map_location = -1;
+    int normal_map_location = -1;
+    int normal_strength_location = -1;
+    int emission_color_location = -1;
+    int specular_tint_location = -1;
     int diffuse_texture_location = -1;
     int clearcoat_location = -1;
     int clearcoat_roughness_location = -1;
@@ -220,9 +273,47 @@ public:
     // TAA / Upscaling variables
     // Screen-space reflections, toggleable at runtime from the Options menu.
     GIMode gi_mode = GIMode::SSGI;
-    // Neither advanced path has a backend in this build; the UI reads these so it can
-    // say so plainly instead of offering a mode that quietly does nothing.
-    static constexpr bool vxgi_supported = false;
+
+    // --- Voxel cone tracing (VXGI) ------------------------------------------
+    // Indirect light gathered by cone-marching a voxelised copy of the scene,
+    // rather than by sampling neighbouring pixels. The point of paying for it is
+    // that it is not screen-space: light bouncing off a wall behind the camera, or
+    // off a surface hidden behind another object, still contributes. Turning the
+    // camera does not change the answer.
+    //
+    // Requires image load/store, so GL 4.2+ in practice. On a driver without it
+    // (the minimum-target Intel part among them) vxgi_available stays false and the
+    // GI mode falls back to SSGI, which is reported once at startup.
+    bool vxgi_available = false;
+
+    // Side length of the voxel grid. 128 is 16.7M voxels; at RGBA16F plus the
+    // R32UI accumulation buffer that is ~200 MB, which is already the practical
+    // ceiling on anything integrated. Dropping to 64 costs eight times less and is
+    // the setting to reach for on a small GPU.
+    int voxel_resolution = 128;
+
+    // World-space side length the grid covers, centred on the camera. The voxel
+    // size that follows from it (extent / resolution) is what sets how fine a
+    // detail can bounce light: at 64 units over 128 voxels a voxel is half a unit,
+    // so a chair bounces light but a doorknob does not.
+    float voxel_world_extent = 64.0f;
+
+    // Scales the cone-traced result. Physically it should be 1; in practice a
+    // voxelised scene over-occludes slightly and this is the trim.
+    float vxgi_intensity = 1.0f;
+
+    // Re-voxelising every frame costs more than the cone tracing does. Static
+    // geometry does not move, so the volume is rebuilt only when the camera has
+    // left the region it was built for, or when something in the scene changed.
+    bool voxel_volume_dirty = true;
+    // VXGI has a backend now - voxelisation, filtering and cone tracing - but it
+    // needs image load/store, so whether it can actually run is a per-driver answer
+    // rather than a build-time one. vxgi_available carries that; this constant just
+    // records that the code exists at all.
+    static constexpr bool vxgi_supported = true;
+    // Hardware ray tracing still has no backend: it needs a Vulkan or DX12 device,
+    // and this renderer is OpenGL only. The UI reads this so it can say so plainly
+    // instead of offering a mode that quietly does nothing.
     static constexpr bool hardware_rt_supported = false;
 
     bool enable_ssr = true;
@@ -298,6 +389,8 @@ public:
     // Baked indirect light written by every geometry-pass shader: the lightmap for
     // static surfaces, the probe grid's ambient cube for everything else.
     unsigned int gBakedGI = 0;
+    // Sixth G-buffer target: emission colour in rgb, specular tint in a.
+    unsigned int gMaterial = 0;
     unsigned int gDepth = 0;
     
     // Legacy resolve FBO (now acts as the lighting pass output before post-processing)
@@ -465,19 +558,81 @@ public:
     void render_bloom();
     void resolve_fxaa();
     
-    // Shadow handles
+    // --- Cascaded shadow maps ------------------------------------------------
+    //
+    // One depth texture array of kShadowCascades layers, each fitted to a slice of
+    // the view frustum. A single map cannot serve both a character's feet and a
+    // hillside a hundred metres away: the texel density either starves the near
+    // field or the map simply does not reach the far one.
+    //
+    // Each cascade is fitted to the *bounding sphere* of its frustum slice rather
+    // than to the slice's box. A sphere is rotation-invariant, so its radius - and
+    // therefore the cascade's world-units-per-texel - does not change as the camera
+    // turns. Fitting a box makes the cascade grow and shrink through a turn, and
+    // every shadow edge in it crawls in sympathy.
     unsigned int shadow_fbo = 0;
-    unsigned int shadow_depth_map = 0;
+    // GL_TEXTURE_2D_ARRAY with one depth layer per cascade. An array rather than
+    // four framebuffers so the lighting pass can select a cascade with an index
+    // instead of needing four bound samplers.
+    unsigned int shadow_depth_array = 0;
     unsigned int depth_shader_program = 0;
     int depth_model_location = -1;
     int depth_light_space_location = -1;
     int depth_skinned_location = -1;
     int depth_bones_location = -1;
+    // Cascade 0's matrix, kept under the old name because the geometry pass and
+    // MaterialShader still carry a uLightSpaceMatrix uniform. Shadowing itself is
+    // deferred and reads the cascade array, so this only feeds those vestigial
+    // uniforms - the shadow pass uses cascade_light_space[] directly.
     Matrix4x4 light_space_matrix;
 
+    // Per-cascade state, rebuilt once per frame by update_shadow_cascades().
+    Matrix4x4 cascade_light_space[kShadowCascades];
+    // View-space distance at which each cascade ends. Cascade i covers
+    // (cascade_split_depth[i-1], cascade_split_depth[i]].
+    float cascade_split_depth[kShadowCascades] = {};
+    // World units covered by one texel of each cascade. PCSS needs this to turn a
+    // depth difference into a real penumbra width, and the bias needs it because a
+    // single global bias cannot serve four very different texel densities.
+    float cascade_texel_world[kShadowCascades] = {};
+    // World units spanned by each cascade's [0,1] depth range, for the same reason.
+    float cascade_depth_range[kShadowCascades] = {};
+    // Light-space transform of each cascade without its projection, used to cull
+    // casters against the cascade currently being drawn.
+    Matrix4x4 cascade_light_view[kShadowCascades];
+    float cascade_radius[kShadowCascades] = {};
+    float cascade_extrusion[kShadowCascades] = {};
+    // Resolution the array was actually allocated at, so a change to
+    // shadow_map_resolution can reallocate rather than silently do nothing.
+    int allocated_shadow_resolution = 0;
+    int active_shadow_cascade = 0;
+
     void init_shadow_map();
-    void begin_shadow_pass();
+    // Recomputes every cascade's fit for this frame. Called from
+    // begin_shadow_pass(0); calling it per cascade would refit the frustum four
+    // times over for the same answer.
+    void update_shadow_cascades();
+    // True if a caster with this camera-relative bounding sphere can put anything
+    // into the cascade currently being drawn.
+    bool cascade_accepts_caster(const Vector3& center_relative, float radius) const;
+    // Binds cascade `cascade` as the depth target and uploads its light-space
+    // matrix. The caller draws every caster once per cascade; see Engine::render.
+    void begin_shadow_pass(int cascade = 0);
     void end_shadow_pass();
+
+    // --- Voxelisation pass ---------------------------------------------------
+    // Same shape as the shadow pass: the caller draws the scene once more, into the
+    // voxel grid instead of a depth map. Returns false when there is nothing to do -
+    // VXGI is not the active mode, the driver cannot support it, or the existing
+    // volume is still good - in which case the caller skips the draws entirely.
+    bool begin_voxel_pass();
+    void render_mesh_voxel(const StaticMeshComponent& mesh_component, const Transform& transform,
+                           const Vector3& albedo, float emissive,
+                           const std::vector<Matrix4x4>* bone_matrices = nullptr,
+                           const class MeshResource* lod_mesh = nullptr);
+    void end_voxel_pass();
+    // True when the mode is VXGI and the driver can actually run it.
+    bool vxgi_active() const;
     // Skinned casters need the same palette as the geometry pass, or a character's
     // shadow stays frozen in bind pose while the character itself animates.
     void render_mesh_shadow(const StaticMeshComponent& mesh_component, const Transform& transform,
@@ -491,7 +646,10 @@ public:
     int fbo_width = 0;
     int fbo_height = 0;
 
-    unsigned int compile_shaders(const std::string& vertex_src, const std::string& fragment_src);
+    // debug_name only labels compile/link diagnostics; it is not part of the
+    // program binary cache key, which is derived from the source itself.
+    unsigned int compile_shaders(const std::string& vertex_src, const std::string& fragment_src,
+                                 const char* debug_name = "shader");
 
     // HDRI environment map (equirectangular, mipmapped for roughness-based LOD sampling)
     unsigned int env_map_texture = 0;
@@ -526,10 +684,6 @@ public:
     int env_map_max_lod_location = -1;
     int irradiance_map_location = -1;
     int prefiltered_env_location = -1;
-    // Shadow-map metrics, needed by PCSS to convert a normalised depth difference
-    // into a real penumbra width in shadow-map texels.
-    float shadow_texel_world_size = 1.0f;
-    float shadow_depth_range = 1.0f;
 
 public:
     // Aerial-perspective fog. Density is per world unit; height falloff controls how
@@ -557,6 +711,32 @@ private:
     unsigned int bloom_prefilter_program = 0;
     unsigned int bloom_down_program = 0;
     unsigned int bloom_up_program = 0;
+
+    // --- VXGI resources -----------------------------------------------------
+    // Radiance, filtered. Mipmapped: a cone step of a given width reads the mip
+    // whose voxels are that wide, which is what makes one texture fetch stand in
+    // for the whole cross-section of the cone at that distance.
+    unsigned int voxel_radiance_texture = 0;
+    // Voxelisation target. R32UI rather than the RGBA16F above because several
+    // triangles land in one voxel and the winner has to be resolved atomically;
+    // plain imageStore races, and the loser changing frame to frame is visible as
+    // flicker in the indirect light.
+    unsigned int voxel_accum_texture = 0;
+    unsigned int voxelize_shader_program = 0;
+    unsigned int voxel_resolve_program = 0;
+    // Grid origin in camera-relative world space, snapped to whole voxels. Snapping
+    // is what stops the indirect light crawling as the camera moves: without it the
+    // grid slides continuously and every voxel's contents change every frame.
+    Vector3 voxel_origin = { 0.0f, 0.0f, 0.0f };
+    float voxel_size = 0.5f;
+    int allocated_voxel_resolution = 0;
+    // Camera position the current volume was built around, to decide when it has
+    // drifted far enough to be worth rebuilding.
+    DVector3 voxel_built_at = { 0.0, 0.0, 0.0 };
+    bool voxel_volume_valid = false;
+
+    void init_vxgi();
+    void init_voxelize_shaders();
 
     unsigned int ssao_fbo = 0, ssao_texture = 0;
     unsigned int ssao_blur_fbo = 0, ssao_blur_texture = 0;

@@ -1,4 +1,5 @@
 #include "core/scene_serializer.hpp"
+#include <set>
 #include "core/asset_database.hpp"
 #include <nlohmann/json.hpp>
 #include <cctype>
@@ -134,6 +135,11 @@ json actor_to_json(Actor* actor) {
     {
         json actor_json;
         actor_json["name"] = actor->get_name();
+        // Outliner folder. Written only when set, so scenes with no folders are
+        // byte-identical to how they were before folders existed.
+        if (!actor->get_folder_path().empty()) {
+            actor_json["folder"] = actor->get_folder_path();
+        }
         actor_json["shape_type"] = actor->shape_type;
         AssetDatabase::get().write_ref(actor_json, "mesh_path", actor->mesh_path);
         AssetDatabase::get().write_ref(actor_json, "material_path", actor->material_path);
@@ -145,6 +151,10 @@ json actor_to_json(Actor* actor) {
         actor_json["clearcoat_roughness"] = actor->clearcoat_roughness;
         actor_json["sheen"] = actor->sheen;
         actor_json["subsurface"] = actor->subsurface;
+        actor_json["normal_strength"] = actor->normal_strength;
+        actor_json["specular_tint"] = actor->specular_tint;
+        actor_json["emission_color"] = { actor->emission_color.x, actor->emission_color.y,
+                                         actor->emission_color.z };
 
         Transform& t = actor->get_actor_transform();
         actor_json["transform"] = {
@@ -508,8 +518,31 @@ json merge_overrides(const json& prefab, const json& overrides) {
 
 } // namespace
 
-void SceneSerializer::save_scene(const std::string& filepath, const std::vector<std::shared_ptr<Actor>>& actors) {
+namespace { std::vector<std::string> g_last_loaded_folders; }
+
+const std::vector<std::string>& SceneSerializer::last_loaded_folders() {
+    return g_last_loaded_folders;
+}
+
+void SceneSerializer::save_scene(const std::string& filepath, const std::vector<std::shared_ptr<Actor>>& actors,
+                                 const std::vector<std::string>& extra_folders) {
     json scene_json;
+    // Folders are recorded separately from the actors filed in them. Deriving the
+    // list from actor paths alone would silently delete any folder the user created
+    // and had not put anything in yet.
+    {
+        std::set<std::string> folders;
+        for (const auto& actor : actors) {
+            if (actor && !actor->get_folder_path().empty()) folders.insert(actor->get_folder_path());
+        }
+        for (const std::string& folder : extra_folders) folders.insert(folder);
+        if (!folders.empty()) {
+            scene_json["outliner_folders"] = json::array();
+            for (const std::string& folder : folders) {
+                scene_json["outliner_folders"].push_back(folder);
+            }
+        }
+    }
     scene_json["actors"] = json::array();
     for (const auto& actor : actors) {
         json record = actor_to_json(actor.get());
@@ -563,6 +596,7 @@ namespace {
 std::shared_ptr<Actor> actor_from_json(const json& actor_json) {
     {
         std::string name = actor_json["name"];
+        const std::string folder = actor_json.value("folder", std::string());
         std::string shape_type = actor_json["shape_type"];
         std::string mesh_path = AssetDatabase::get().read_ref(actor_json, "mesh_path");
 
@@ -607,6 +641,15 @@ std::shared_ptr<Actor> actor_from_json(const json& actor_json) {
         new_actor->clearcoat_roughness = actor_json.value("clearcoat_roughness", 0.1f);
         new_actor->sheen = actor_json.value("sheen", 0.0f);
         new_actor->subsurface = actor_json.value("subsurface", 0.0f);
+        new_actor->normal_strength = actor_json.value("normal_strength", 1.0f);
+        new_actor->set_folder_path(folder);
+        new_actor->specular_tint = actor_json.value("specular_tint", 0.0f);
+        if (actor_json.contains("emission_color") && actor_json["emission_color"].is_array() &&
+            actor_json["emission_color"].size() == 3) {
+            new_actor->emission_color = { actor_json["emission_color"][0].get<float>(),
+                                          actor_json["emission_color"][1].get<float>(),
+                                          actor_json["emission_color"][2].get<float>() };
+        }
 
         auto t_json = actor_json["transform"];
         Transform& t = new_actor->get_actor_transform();
@@ -945,6 +988,13 @@ bool SceneSerializer::load_scene(const std::string& filepath, std::vector<std::s
     out_actors.clear();
     if (!scene_json.contains("actors")) return false;
 
+    g_last_loaded_folders.clear();
+    if (scene_json.contains("outliner_folders") && scene_json["outliner_folders"].is_array()) {
+        for (const auto& folder : scene_json["outliner_folders"]) {
+            if (folder.is_string()) g_last_loaded_folders.push_back(folder.get<std::string>());
+        }
+    }
+
     for (const auto& actor_json : scene_json["actors"]) {
         if (actor_json.contains("prefab")) {
             const std::string prefab_path = actor_json["prefab"].get<std::string>();
@@ -985,6 +1035,12 @@ bool SceneSerializer::load_scene(const std::string& filepath, std::vector<std::s
 // save it, and every later instantiation starts from that configuration. Because it
 // reuses actor_to_json/actor_from_json it carries everything a scene entry does -
 // mesh, material, lights, physics body, transform.
+
+std::shared_ptr<Actor> SceneSerializer::clone_actor(Actor* actor) {
+    if (!actor) return nullptr;
+    // No file involved - the record never leaves memory.
+    return actor_from_json(actor_to_json(actor));
+}
 
 bool SceneSerializer::save_prefab(const std::string& filepath, Actor* actor) {
     if (!actor) return false;

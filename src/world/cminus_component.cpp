@@ -53,8 +53,14 @@ void CMinusComponent::tick(float delta_time) {
     if (has_error) return;
 
     interpreter.actor_owner = owner;
-    interpreter.variables["time"] += delta_time;
-    interpreter.variables["dt"] = delta_time;
+    // Values are tagged now, not bare floats, so the accumulator has to be read back
+    // through the tag rather than added to directly. A "time" left over as some other
+    // type (a script assigned it a string, say) restarts from zero instead of
+    // corrupting the accumulation.
+    CMinus::Value& elapsed = interpreter.variables["time"];
+    const float previous = elapsed.is_number() ? elapsed.x : 0.0f;
+    elapsed = CMinus::Value::number(previous + delta_time);
+    interpreter.variables["dt"] = CMinus::Value::number(delta_time);
 
     try {
         interpreter.execute(parsed_program);

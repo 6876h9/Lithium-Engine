@@ -8,6 +8,7 @@
 // engine code.
 
 #include <string>
+#include <vector>
 #include <filesystem>
 
 #if defined(_WIN32)
@@ -49,5 +50,26 @@ std::string cpp_compiler_command();
 
 // Directory for short-lived build artefacts (/tmp, or %TEMP% on Windows).
 std::filesystem::path temp_dir();
+
+// --- External processes ----------------------------------------------------
+// True if `name` is runnable - found on PATH, or an absolute path to an existing
+// executable. Used to detect which code editors are actually installed rather than
+// offering the user a list of things that will fail to launch.
+bool executable_exists(const std::string& name);
+
+// Launches a program and returns immediately, without waiting for it to exit.
+//
+// This is the whole point: std::system blocks until the child finishes, so opening
+// a file in an editor that way would freeze the engine for as long as the editor
+// stayed open. Uses fork/exec on Linux and CreateProcess on Windows, and the child
+// is detached so closing the engine does not take the editor with it.
+//
+// `arguments` is passed through verbatim - no shell is involved, so a path with
+// spaces or quotes in it needs no escaping and cannot be reinterpreted as a command.
+bool launch_detached(const std::string& executable, const std::vector<std::string>& arguments);
+
+// Opens a path with whatever the desktop has associated with it (xdg-open, or
+// ShellExecute on Windows). The fallback when no specific editor is configured.
+bool open_with_default_application(const std::string& path);
 
 } // namespace Platform

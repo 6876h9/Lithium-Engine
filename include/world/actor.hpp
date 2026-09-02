@@ -55,10 +55,57 @@ public:
         }
     }
 
+    // Detach a component and hand back ownership, instead of destroying it the way
+    // remove_component does. The undo stack needs the original object preserved: a
+    // removal that destroyed it could only ever restore a default-constructed stand-in,
+    // silently discarding whatever the user had configured. Returns null if the
+    // component does not belong to this actor.
+    std::unique_ptr<ActorComponent> release_component(ActorComponent* comp) {
+        for (auto it = components.begin(); it != components.end(); ++it) {
+            if (it->get() == comp) {
+                std::unique_ptr<ActorComponent> detached = std::move(*it);
+                components.erase(it);
+                // A detached root would leave a dangling root_component behind.
+                if (root_component == static_cast<void*>(detached.get())) {
+                    root_component = nullptr;
+                }
+                return detached;
+            }
+        }
+        return nullptr;
+    }
+
+    // Re-attach a previously released component at its original position, so an undone
+    // removal restores list order rather than appending to the end. An out-of-range or
+    // negative index appends.
+    void adopt_component(std::unique_ptr<ActorComponent> comp, int index = -1) {
+        if (!comp) return;
+        if (index < 0 || static_cast<size_t>(index) >= components.size()) {
+            components.push_back(std::move(comp));
+        } else {
+            components.insert(components.begin() + index, std::move(comp));
+        }
+    }
+
+    // Position of a component in the list, or -1 if it is not this actor's.
+    int index_of_component(const ActorComponent* comp) const {
+        for (size_t i = 0; i < components.size(); ++i) {
+            if (components[i].get() == comp) return static_cast<int>(i);
+        }
+        return -1;
+    }
+
     const std::vector<std::unique_ptr<ActorComponent>>& get_components() const { return components; }
 
     Transform& get_actor_transform();
     const std::string& get_name() const { return name; }
+
+    // Outliner folder this actor is filed under, as a '/'-separated path
+    // ("Lighting/Interior"). Empty means the root. Purely an editor-side
+    // organisation aid - it has no effect on transforms, parenting or gameplay,
+    // which is exactly why it is a string here rather than real hierarchy.
+    const std::string& get_folder_path() const { return folder_path; }
+    void set_folder_path(const std::string& path) { folder_path = path; }
     void set_name(const std::string& new_name) { name = new_name; }
 
     // Editor editable properties
@@ -70,6 +117,16 @@ public:
     float clearcoat_roughness = 0.1f;
     float sheen = 0.0f;
     float subsurface = 0.0f;
+    // Scales the normal map's perturbation. 0 is the bare geometric surface, 1 is
+    // the map as authored, and above that exaggerates it. Only has an effect on a
+    // mesh that actually resolved a normal map.
+    float normal_strength = 1.0f;
+    // Hue the emission takes. The scalar `emissive` above is its intensity, so a
+    // grey lamp housing with a warm bulb is these two together.
+    Vector3 emission_color = { 1.0f, 1.0f, 1.0f };
+    // How far the dielectric specular highlight takes the albedo's hue instead of
+    // staying white. Irrelevant once metallic reaches 1.
+    float specular_tint = 0.0f;
     // Self-illumination. Added directly to the surface's outgoing radiance, so it
     // stays bright regardless of scene lighting and blooms like a real light source.
     float emissive = 0.0f;
@@ -106,6 +163,7 @@ public:
 
 private:
     std::string name;
+    std::string folder_path;
     SceneComponent* root_component = nullptr;
     std::vector<std::unique_ptr<ActorComponent>> components;
 };

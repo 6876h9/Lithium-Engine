@@ -58,6 +58,9 @@ struct RenderMeshCommand {
     float sheen;
     float subsurface;
     float emissive;
+    float normal_strength = 1.0f;
+    Vector3 emission_color = { 1.0f, 1.0f, 1.0f };
+    float specular_tint = 0.0f;
     bool is_invisible;
     bool is_selected;
 };
@@ -319,6 +322,13 @@ public:
     Vector3 camera_rot = {0.0f, 0.0f, 0.0f}; // pitch (X), yaw (Y)
     float ortho_zoom = 10.0f;
     bool is_rmb_down = false;
+    // Set when SDL_SetRelativeMouseMode was refused for this drag (it requires window
+    // input focus, which a fresh right-click into an unfocused window does not yet
+    // have). The look controls then integrate absolute cursor deltas instead, so the
+    // drag still works rather than silently doing nothing.
+    bool rmb_relative_fallback = false;
+    int rmb_last_mouse_x = 0;
+    int rmb_last_mouse_y = 0;
 private:
     
     // World Partition

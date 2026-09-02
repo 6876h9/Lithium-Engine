@@ -25,6 +25,19 @@ struct VertexBoneData {
     float weights[kMaxInfluences]  = { 0.0f, 0.0f, 0.0f, 0.0f };
 };
 
+// Per-vertex tangent frame, in a stream parallel to Vertex for the same reason
+// VertexBoneData is: Vertex is written raw into .mesh files and read back verbatim
+// by the path tracer, so adding a field to it would silently misparse every asset
+// already on disk.
+//
+// xyz is the tangent; w is +1 or -1 and records whether the UV winding is mirrored.
+// The bitangent is cross(normal, tangent) * w, so one float carries what would
+// otherwise be a second three-component stream - and mirrored UVs are extremely
+// common, because that is how anyone gets a symmetric character out of half a texture.
+struct VertexTangent {
+    Vector4 tangent = { 1.0f, 0.0f, 0.0f, 1.0f };
+};
+
 struct MeshCluster {
     Vector3 bounds_center;
     float bounds_radius;
@@ -87,6 +100,16 @@ public:
     void set_diffuse_texture(std::shared_ptr<class TextureResource> texture) { diffuse_texture = texture; }
     std::shared_ptr<class TextureResource> get_diffuse_texture() const { return diffuse_texture; }
 
+    // Normal map. Held separately from the diffuse texture because it is resolved
+    // by convention from the diffuse path rather than by the importer, and because
+    // a mesh legitimately has one without the other.
+    void set_normal_texture(std::shared_ptr<class TextureResource> texture) { normal_texture = texture; }
+    std::shared_ptr<class TextureResource> get_normal_texture() const { return normal_texture; }
+    const std::vector<VertexTangent>& get_tangents() const { return tangents; }
+    // Builds the tangent frames from positions, UVs and normals. Called when
+    // geometry is set; safe to call again after the mesh changes.
+    void generate_tangents();
+
     // Normally the lazy resolve is driven by render(). TESLA has to ask for it
     // itself: in path-tracing mode the rasteriser's mesh path never runs, so an
     // imported mesh's texture would otherwise never be requested at all.
@@ -106,6 +129,7 @@ private:
     // regardless of Editor/PlayInEditor state - unlike tick(), which is gated
     // to PlayInEditor and so can't be relied on for this.
     mutable std::shared_ptr<class TextureResource> diffuse_texture = nullptr;
+    mutable std::shared_ptr<class TextureResource> normal_texture = nullptr;
     mutable bool texture_resolve_attempted = false;
 
     std::vector<Vertex> vertices;
@@ -121,6 +145,9 @@ private:
 
     unsigned int vao = 0;
     unsigned int vbo = 0;
+    // Tangent frames, uploaded alongside the vertex buffer into attribute 6.
+    unsigned int tangent_vbo = 0;
+    std::vector<VertexTangent> tangents;
     unsigned int ebo = 0;
 
     // Lightmapped draws need their own vertex array: the geometry buffers may belong

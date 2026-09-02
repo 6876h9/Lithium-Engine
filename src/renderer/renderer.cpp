@@ -61,6 +61,8 @@ PFNGLMULTIDRAWELEMENTSPROC glMultiDrawElements = nullptr;
 PFNGLUNIFORM1UIPROC glUniform1ui = nullptr;
 PFNGLBINDBUFFERBASEPROC glBindBufferBase = nullptr;
 PFNGLDISPATCHCOMPUTEPROC glDispatchCompute = nullptr;
+PFNGLBINDIMAGETEXTUREPROC glBindImageTexture = nullptr;
+PFNGLTEXSTORAGE3DPROC glTexStorage3D = nullptr;
 PFNGLMEMORYBARRIERPROC glMemoryBarrier = nullptr;
 PFNGLMULTIDRAWELEMENTSINDIRECTPROC glMultiDrawElementsIndirect = nullptr;
 
@@ -76,6 +78,7 @@ PFNGLDRAWARRAYSINSTANCEDPROC glDrawArraysInstanced = nullptr;
 PFNGLGETUNIFORMLOCATIONPROC glGetUniformLocation = nullptr;
 PFNGLUNIFORMMATRIX4FVPROC glUniformMatrix4fv = nullptr;
 PFNGLUNIFORM3FVPROC glUniform3fv = nullptr;
+PFNGLUNIFORM1FVPROC glUniform1fv = nullptr;
 PFNGLUNIFORM1IPROC glUniform1i = nullptr;
 PFNGLUNIFORM1FPROC glUniform1f = nullptr;
 PFNGLUNIFORM4FVPROC glUniform4fv = nullptr;
@@ -107,6 +110,66 @@ PFNGLTEXIMAGE2DMULTISAMPLEPROC glTexImage2DMultisample = nullptr;
 PFNGLRENDERBUFFERSTORAGEMULTISAMPLEPROC glRenderbufferStorageMultisample = nullptr;
 PFNGLBLITFRAMEBUFFERPROC glBlitFramebuffer = nullptr;
 PFNGLUNIFORM2FPROC glUniform2f = nullptr;
+
+// ---------------------------------------------------------------------------
+// Entry points and enums the shadow cascade array needs that gl_loader.hpp does not
+// already carry. Resolved here rather than added to the shared loader header so the
+// renderer's own additions stay inside the renderer.
+//
+// The pointer is deliberately not named glFramebufferTextureLayer: on a platform
+// whose system headers do declare it, a same-named global would clash with that
+// declaration - the same trap gl_loader.hpp documents for the Windows 1.2 entry
+// points.
+// ---------------------------------------------------------------------------
+#ifndef GL_TEXTURE_2D_ARRAY
+#define GL_TEXTURE_2D_ARRAY 0x8C1A
+#endif
+#ifndef GL_DEPTH_COMPONENT24
+#define GL_DEPTH_COMPONENT24 0x81A6
+#endif
+#ifndef GL_TEXTURE_WRAP_R
+#define GL_TEXTURE_WRAP_R 0x8072
+#endif
+#ifndef GL_GEOMETRY_SHADER
+#define GL_GEOMETRY_SHADER 0x8DD9
+#endif
+#ifndef GL_MAX_FRAGMENT_IMAGE_UNIFORMS
+#define GL_MAX_FRAGMENT_IMAGE_UNIFORMS 0x90CE
+#endif
+#ifndef GL_MAX_COMPUTE_IMAGE_UNIFORMS
+#define GL_MAX_COMPUTE_IMAGE_UNIFORMS 0x91BD
+#endif
+#ifndef GL_R32UI
+#define GL_R32UI 0x8236
+#endif
+#ifndef GL_RED_INTEGER
+#define GL_RED_INTEGER 0x8D94
+#endif
+#ifndef GL_SHADER_IMAGE_ACCESS_BARRIER_BIT
+#define GL_SHADER_IMAGE_ACCESS_BARRIER_BIT 0x00000020
+#endif
+#ifndef GL_TEXTURE_FETCH_BARRIER_BIT
+#define GL_TEXTURE_FETCH_BARRIER_BIT 0x00000008
+#endif
+#ifndef GL_READ_WRITE
+#define GL_READ_WRITE 0x88BA
+#endif
+#ifndef GL_READ_ONLY
+#define GL_READ_ONLY 0x88B8
+#endif
+#ifndef GL_WRITE_ONLY
+#define GL_WRITE_ONLY 0x88B9
+#endif
+#ifndef GL_RGBA16F
+#define GL_RGBA16F 0x881A
+#endif
+#ifndef GL_NUM_PROGRAM_BINARY_FORMATS
+#define GL_NUM_PROGRAM_BINARY_FORMATS 0x87FE
+#endif
+
+typedef void (GL_APIENTRY *PFNGLFRAMEBUFFERTEXTURELAYERLITHPROC)(GLenum target, GLenum attachment,
+                                                                 GLuint texture, GLint level, GLint layer);
+static PFNGLFRAMEBUFFERTEXTURELAYERLITHPROC lithium_glFramebufferTextureLayer = nullptr;
 
 namespace {
 
@@ -154,6 +217,11 @@ const std::string& geometry_vertex() {
         // "leave this vertex alone" case handled below, so one program serves both.
         layout (location = 4) in ivec4 aBoneIDs;
         layout (location = 5) in vec4 aWeights;
+        // Tangent frame. xyz is the direction texture U runs in; w is the handedness
+        // of the UV winding, which mirrored maps flip. A mesh with no tangent buffer
+        // supplies a constant (0,0,0,0), and the fragment shader falls back to the
+        // geometric normal on a zero-length tangent.
+        layout (location = 6) in vec4 aTangent;
         // Second uv set, unique per actor rather than per mesh asset: two actors
         // sharing a mesh occupy different regions of the lightmap atlas. Supplied by
         // a per-component buffer, and a constant (0,0) when there is none.
@@ -161,6 +229,8 @@ const std::string& geometry_vertex() {
 
         out vec3 FragPos;
         out vec3 Normal;
+        out vec3 Tangent;
+        out float TangentSign;
         out vec3 ourColor;
         out vec2 TexCoord;
         out vec2 LightmapUV;
@@ -177,6 +247,9 @@ const std::string& geometry_vertex() {
         void main() {
             vec3 position = aPos;
             vec3 normal = aNormal;
+            // The tangent is skinned by the same palette as the normal: a frame left
+            // in bind pose would light a moving limb as though it had not moved.
+            vec3 tangent = aTangent.xyz;
 
             if (uSkinned) {
                 float total = aWeights.x + aWeights.y + aWeights.z + aWeights.w;
@@ -196,12 +269,18 @@ const std::string& geometry_vertex() {
                     // bone scale, but rigs overwhelmingly use rigid bones, and the
                     // per-vertex inverse the exact form needs is far too expensive.
                     normal = mat3(skin) * aNormal;
+                    tangent = mat3(skin) * tangent;
                 }
             }
 
             gl_Position = uMVP * vec4(position, 1.0);
             FragPos = vec3(uModel * vec4(position, 1.0));
             Normal = mat3(transpose(inverse(uModel))) * normal;
+            // The tangent is a direction along the surface, so it transforms by the
+            // model matrix itself rather than by the inverse transpose the normal
+            // needs - it stays tangent under shear where the normal would not.
+            Tangent = mat3(uModel) * tangent;
+            TangentSign = aTangent.w;
             ourColor = aColor;
             TexCoord = aUV;
             LightmapUV = aLightmapUV;
@@ -252,9 +331,13 @@ bool Renderer::initialize(int width, int height) {
         layout (location = 2) out vec4 gAlbedoSpec;
         layout (location = 3) out vec4 gPBR;
         layout (location = 4) out vec4 gBakedGI;
+        // rgb = emission colour, a = specular tint. See create_fbo.
+        layout (location = 5) out vec4 gMaterial;
 
         in vec3 FragPos;
         in vec3 Normal;
+        in vec3 Tangent;
+        in float TangentSign;
         in vec3 ourColor;
         in vec2 TexCoord;
         in vec2 LightmapUV;
@@ -266,6 +349,15 @@ bool Renderer::initialize(int width, int height) {
         uniform bool uEnableUE4Lighting;
         uniform sampler2D uDiffuseTexture;
         uniform bool uHasDiffuseTexture;
+        uniform bool uHasNormalMap;
+        uniform sampler2D uNormalMap;
+        // Scales the perturbation only, not the base normal, so 0 is exactly the
+        // unmapped surface and values above 1 exaggerate without denormalising.
+        uniform float uNormalStrength;
+        // Emission colour and specular tint. Emissive intensity stays in gPosition.w;
+        // this is only the hue it takes, so a warm bulb in a grey housing works.
+        uniform vec3 uEmissionColor;
+        uniform float uSpecularTint;
         uniform float uClearcoat;
         uniform float uClearcoatRoughness;
         uniform float uSheen;
@@ -275,6 +367,32 @@ bool Renderer::initialize(int width, int height) {
         uniform bool uHasLightmap;
         // Six directional colours: +x, -x, +y, -y, +z, -z.
         uniform vec3 uAmbientCube[6];
+
+        // Rotates a tangent-space normal into world space, using the interpolated
+        // frame. Interpolation denormalises both vectors, and re-orthogonalising the
+        // tangent against the normal here costs one dot product and removes the
+        // skew that otherwise shows up as shading that swims across a curved surface.
+        vec3 applyNormalMap(vec3 geometricNormal) {
+            if (!uHasNormalMap) return geometricNormal;
+
+            vec3 n = normalize(geometricNormal);
+            vec3 t = Tangent - n * dot(n, Tangent);
+            float tangentLength = length(t);
+            // A mesh with no tangent buffer, or a vertex on a degenerate UV seam,
+            // has nothing to rotate into - the geometric normal is the answer.
+            if (tangentLength < 1e-5) return n;
+            t /= tangentLength;
+
+            // Handedness restores the mirrored half of a symmetric UV layout, which
+            // would otherwise light inverted.
+            vec3 b = cross(n, t) * (TangentSign < 0.0 ? -1.0 : 1.0);
+
+            vec3 sampled = texture(uNormalMap, TexCoord).xyz * 2.0 - 1.0;
+            // Strength scales only the tangential part. Scaling all three components
+            // would renormalise back to the same direction and do nothing at all.
+            sampled.xy *= uNormalStrength;
+            return normalize(mat3(t, b, n) * sampled);
+        }
 
         void main() {
             vec3 objColor = (uColorOverride.a > 0.0) ? uColorOverride.rgb : ourColor;
@@ -307,7 +425,7 @@ bool Renderer::initialize(int width, int height) {
             // Alpha carries emissive: the lighting pass recomputes light-space depth
             // from uLightSpaceMatrix anyway, so the channel was going unread.
             gPosition = vec4(FragPos, uEmissive);
-            gNormal = vec4(normalize(Normal), uSubsurface);
+            gNormal = vec4(applyNormalMap(Normal), uSubsurface);
             gAlbedoSpec = vec4(albedo, uSheen);
             gPBR = vec4(uMetallic, max(uRoughness, 0.1), uClearcoat, max(uClearcoatRoughness, 0.05));
 
@@ -326,6 +444,8 @@ bool Renderer::initialize(int width, int height) {
                 baked += (n.z >= 0.0 ? uAmbientCube[4] : uAmbientCube[5]) * sq.z;
             }
             gBakedGI = vec4(baked, 1.0);
+    gMaterial = vec4(1.0, 1.0, 1.0, 0.0);
+            gMaterial = vec4(uEmissionColor, uSpecularTint);
         }
     )";
 
@@ -353,6 +473,8 @@ bool Renderer::initialize(int width, int height) {
         uniform sampler2D gAlbedoSpec;
         uniform sampler2D gPBR;
         uniform sampler2D gBakedGI;
+        // rgb = emission colour, a = specular tint.
+        uniform sampler2D gMaterial;
         // Ambient occlusion from render_ssao(). This is the *previous* frame's
         // result: the SSGI half of that pass samples the lit scene colour, so it
         // cannot run before lighting, and AO is low-frequency and temporally stable
@@ -363,7 +485,9 @@ bool Renderer::initialize(int width, int height) {
         // a resize does not multiply ambient by an empty buffer and go black.
         uniform bool uHasSSAO;
         uniform float uSSAOStrength;
-        uniform sampler2D shadowMap;
+        // Cascaded shadow maps: one depth layer per cascade, all four in one array
+        // so a cascade is selected with an index instead of four bound samplers.
+        uniform sampler2DArray uShadowMaps;
         uniform sampler2D uEnvironmentMap;
         uniform sampler2D uIrradianceMap;
         uniform sampler2D uPrefilteredEnv;
@@ -388,8 +512,27 @@ bool Renderer::initialize(int width, int height) {
         uniform bool uEnableUE4Lighting;
         uniform bool uEnableRayTracing;
         uniform mat4 uLightSpaceMatrix;
-        uniform float uShadowTexelWorldSize;  // world units covered by one shadow texel
-        uniform float uShadowDepthRange;      // world units spanned by the [0,1] depth range
+        // --- Cascade state, one entry per cascade -----------------------------
+        // kShadowCascades is mirrored from Renderer::kShadowCascades; a
+        // static_assert on the C++ side keeps the two from drifting apart.
+        const int kShadowCascades = 4;
+        uniform mat4 uCascadeMatrices[kShadowCascades];
+        // View-space distance at which each cascade ends.
+        uniform float uCascadeSplits[kShadowCascades];
+        // World units covered by one texel of each cascade. PCSS turns a depth
+        // difference into a penumbra width with this, and the bias is expressed in
+        // texels because cascade 3's are ~30x wider than cascade 0's.
+        uniform float uCascadeTexelWorld[kShadowCascades];
+        // World units spanned by each cascade's [0,1] depth range.
+        uniform float uCascadeDepthRange[kShadowCascades];
+        // Camera forward in camera-relative world space. G-buffer positions are
+        // camera-relative, so a fragment's view depth is just its projection onto
+        // this - no need to ship the whole view matrix to recover one number.
+        uniform vec3 uCameraForward;
+        uniform float uCascadeBlend;
+        uniform float uShadowDepthBiasTexels;
+        uniform float uShadowNormalBiasTexels;
+        uniform bool uShadowCascadeDebug;
         uniform vec3 uCameraWorldPos;   // absolute camera position (height fog only)
         uniform float uFogDensity;
         uniform float uFogHeight;
@@ -426,23 +569,46 @@ bool Renderer::initialize(int width, int height) {
             return vec2(d.x * cosR - d.y * sinR, d.x * sinR + d.y * cosR);
         }
 
-        float ShadowCalculation(vec4 fragPosLightSpace, vec3 lightDir, vec3 normal) {
+        // PCSS against one cascade. fragPos is camera-relative world space, the space
+        // the G-buffer stores positions in.
+        float ShadowCalculation(int cascade, vec3 fragPos, vec3 lightDir, vec3 normal) {
+            float texelWorld = uCascadeTexelWorld[cascade];
+            float depthRange = max(uCascadeDepthRange[cascade], 0.0001);
+
+            float NdotL = clamp(dot(normal, lightDir), 0.0, 1.0);
+            // sin of the angle between the surface and the light. A surface edge-on
+            // to the light spans many shadow texels in depth within a single texel of
+            // area, which is exactly where acne comes from, so both biases scale with
+            // it rather than being constant.
+            float slope = sqrt(clamp(1.0 - NdotL * NdotL, 0.0, 1.0));
+
+            // Normal-offset bias: move the *lookup position* off the surface along
+            // its normal by a fraction of this cascade's texel footprint, instead of
+            // only pushing the compared depth. Depth bias alone has to grow with the
+            // texel size to stop acne, and by cascade 3 that amount of depth bias
+            // detaches shadows from their casters; moving sideways in the shadow map
+            // costs nothing in contact accuracy.
+            vec3 samplePos = fragPos + normal * (texelWorld * uShadowNormalBiasTexels * (slope + 0.35));
+
+            vec4 fragPosLightSpace = uCascadeMatrices[cascade] * vec4(samplePos, 1.0);
             vec3 projCoords = fragPosLightSpace.xyz / fragPosLightSpace.w;
             projCoords = projCoords * 0.5 + 0.5;
-            if (projCoords.z > 1.0) return 0.0;
+            if (projCoords.z > 1.0 || projCoords.z < 0.0) return 0.0;
             // Outside the shadow map entirely: treat as lit rather than sampling the
             // clamped border, which used to darken everything past the map's edge.
             if (any(lessThan(projCoords.xy, vec2(0.0))) || any(greaterThan(projCoords.xy, vec2(1.0)))) return 0.0;
 
             float currentDepth = projCoords.z;
-            float NdotL = max(dot(normal, lightDir), 0.0);
-            // Slope-scaled depth bias; small, because PCSS keeps contact regions tight
-            // and an oversized bias is what makes shadows detach from their caster.
-            float bias = max(0.0015 * (1.0 - NdotL), 0.0003);
+            // Constant depth bias, expressed in texels and converted through this
+            // cascade's own depth range. Small, because PCSS keeps contact regions
+            // tight and an oversized bias is what makes shadows detach from their
+            // caster - the normal offset above carries most of the load.
+            float bias = (texelWorld * uShadowDepthBiasTexels * (0.35 + slope)) / depthRange;
 
-            vec2 texelSize = 1.0 / vec2(textureSize(shadowMap, 0));
+            vec2 texelSize = 1.0 / vec2(textureSize(uShadowMaps, 0).xy);
             float rot = shadowNoise(gl_FragCoord.xy) * 6.2831853;
             float cosR = cos(rot), sinR = sin(rot);
+            float layer = float(cascade);
 
             // 1. Blocker search: how deep, on average, are the occluders?
             float blockerSum = 0.0;
@@ -450,7 +616,7 @@ bool Renderer::initialize(int width, int height) {
             float searchRadius = 8.0;
             for (int i = 0; i < kBlockerSamples; ++i) {
                 vec2 offset = spiralTap(i, kBlockerSamples, cosR, sinR) * texelSize * searchRadius;
-                float d = texture(shadowMap, projCoords.xy + offset).r;
+                float d = texture(uShadowMaps, vec3(projCoords.xy + offset, layer)).r;
                 if (d < currentDepth - bias) {
                     blockerSum += d;
                     ++blockerCount;
@@ -465,18 +631,76 @@ bool Renderer::initialize(int width, int height) {
             // to spot/point lights and, used with an ortho map, made the softness
             // depend on where the object sat in the depth range rather than on how far
             // it floated above its occluder).
-            float separationWorld = (currentDepth - avgBlockerDepth) * uShadowDepthRange;
+            float separationWorld = (currentDepth - avgBlockerDepth) * depthRange;
             float penumbraWorld = separationWorld * kSunSoftness;
-            float filterRadius = clamp(penumbraWorld / max(uShadowTexelWorldSize, 0.0001), 1.0, 24.0);
+            float filterRadius = clamp(penumbraWorld / max(texelWorld, 0.0001), 1.0, 24.0);
 
             // 3. PCF over the estimated penumbra.
             float shadow = 0.0;
             for (int i = 0; i < kPcfSamples; ++i) {
                 vec2 offset = spiralTap(i, kPcfSamples, cosR, sinR) * texelSize * filterRadius;
-                float pcfDepth = texture(shadowMap, projCoords.xy + offset).r;
+                float pcfDepth = texture(uShadowMaps, vec3(projCoords.xy + offset, layer)).r;
                 shadow += (currentDepth - bias > pcfDepth) ? 1.0 : 0.0;
             }
             return shadow / float(kPcfSamples);
+        }
+
+        // Picks the cascade covering this fragment's view depth, and returns -1 for
+        // anything past the shadow distance.
+        int selectCascade(float viewDepth) {
+            if (viewDepth <= 0.0 || viewDepth > uCascadeSplits[kShadowCascades - 1]) return -1;
+            for (int i = 0; i < kShadowCascades; ++i) {
+                if (viewDepth <= uCascadeSplits[i]) return i;
+            }
+            return kShadowCascades - 1;
+        }
+
+        // Cascaded shadow lookup. outCascade reports which cascade was chosen, for
+        // the debug visualisation; it is -1 past the shadow distance.
+        float ShadowCascaded(vec3 fragPos, vec3 lightDir, vec3 normal, out int outCascade) {
+            float viewDepth = dot(fragPos, uCameraForward);
+            outCascade = selectCascade(viewDepth);
+            if (outCascade < 0) return 0.0;
+            int cascade = outCascade;
+
+            float shadow = ShadowCalculation(cascade, fragPos, lightDir, normal);
+
+            if (cascade < kShadowCascades - 1) {
+                // Cross-fade into the next cascade over a band at the boundary. The
+                // two cascades disagree slightly - different texel density, different
+                // bias, different snap - and without the fade that disagreement is a
+                // hard line straight across the ground at a fixed distance.
+                float prevSplit = (cascade == 0) ? 0.0 : uCascadeSplits[cascade - 1];
+                float band = max((uCascadeSplits[cascade] - prevSplit) * uCascadeBlend, 0.0001);
+                float t = (viewDepth - (uCascadeSplits[cascade] - band)) / band;
+                if (t > 0.0) {
+                    float next = ShadowCalculation(cascade + 1, fragPos, lightDir, normal);
+                    shadow = mix(shadow, next, clamp(t, 0.0, 1.0));
+                }
+            } else {
+                // Last cascade: fade the shadow out entirely as it approaches the
+                // shadow distance, so shadows stop existing gradually rather than
+                // ending along a visible arc.
+                float band = max(uCascadeSplits[kShadowCascades - 1] * 0.1, 0.0001);
+                float t = (viewDepth - (uCascadeSplits[kShadowCascades - 1] - band)) / band;
+                shadow *= 1.0 - clamp(t, 0.0, 1.0);
+            }
+            return shadow;
+        }
+
+        // Single-tap cascaded visibility, for the volumetric raymarch. 1 = lit.
+        // The raymarch takes 32 steps per pixel, so it cannot afford PCSS; it only
+        // needs to know whether each step sits in shade.
+        float ShadowVisibilityAt(vec3 pos) {
+            int cascade = selectCascade(dot(pos, uCameraForward));
+            if (cascade < 0) return 1.0;
+            vec4 lightSpacePos = uCascadeMatrices[cascade] * vec4(pos, 1.0);
+            vec3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
+            projCoords = projCoords * 0.5 + 0.5;
+            if (projCoords.z > 1.0) return 1.0;
+            if (any(lessThan(projCoords.xy, vec2(0.0))) || any(greaterThan(projCoords.xy, vec2(1.0)))) return 1.0;
+            float d = texture(uShadowMaps, vec3(projCoords.xy, float(cascade))).r;
+            return (projCoords.z <= d + 0.002) ? 1.0 : 0.0;
         }
 
         float DistributionGGX(vec3 N, vec3 H, float roughness) {
@@ -621,6 +845,9 @@ bool Renderer::initialize(int width, int height) {
             vec4 PositionSample = texture(gPosition, TexCoords);
             vec3 FragPos = PositionSample.rgb;
             float emissive = PositionSample.a;
+            vec4 MaterialSample = texture(gMaterial, TexCoords);
+            vec3 emissionColor = MaterialSample.rgb;
+            float specularTint = MaterialSample.a;
             vec4 NormalSample = texture(gNormal, TexCoords);
             vec3 Normal = NormalSample.rgb;
             float subsurface = NormalSample.a;
@@ -646,11 +873,20 @@ bool Renderer::initialize(int width, int height) {
             vec3 N = normalize(Normal);
             vec3 V = normalize(uCameraPos - FragPos);
             
-            vec3 F0 = vec3(0.04); 
+            // Specular tint pulls the dielectric highlight toward the albedo's hue.
+            // Physically a dielectric reflects white, but few real surfaces are pure
+            // dielectrics, and this is the usual artistic control for the difference
+            // - varnish over red wood does throw a faintly warm highlight.
+            vec3 F0 = mix(vec3(0.04), 0.04 * albedo, specularTint);
+            // Metals take their specular colour from albedo outright, so the tint
+            // above is irrelevant once metallic reaches 1.
             F0 = mix(F0, albedo, metallic);
             
             vec3 Lo = vec3(0.0);
             float main_shadow = 0.0;
+            // Which cascade shaded this pixel, for the debug visualisation. -1 means
+            // no directional light reached it, or it is past the shadow distance.
+            int shadowCascade = -1;
             for (int i = 0; i < uNumLights; ++i) {
                 vec3 L;
                 float attenuation = 1.0;
@@ -674,8 +910,9 @@ bool Renderer::initialize(int width, int height) {
 
                 float shadow = 0.0;
                 if (uLights[i].type == 0) {
-                    vec4 FragPosLightSpace = uLightSpaceMatrix * vec4(FragPos, 1.0);
-                    shadow = ShadowCalculation(FragPosLightSpace, L, N);
+                    int cascade = -1;
+                    shadow = ShadowCascaded(FragPos, L, N, cascade);
+                    if (cascade >= 0) shadowCascade = cascade;
                     main_shadow = max(main_shadow, shadow);
                 }
 
@@ -822,23 +1059,17 @@ bool Renderer::initialize(int width, int height) {
                 float scattering = 0.0005 * uLights[0].intensity; // Reduced from 0.02 to prevent blowout
                 
                 for (int j = 0; j < numSteps; j++) {
-                    vec4 lightSpacePos = uLightSpaceMatrix * vec4(currentPos, 1.0);
-                    vec3 projCoords = lightSpacePos.xyz / lightSpacePos.w;
-                    projCoords = projCoords * 0.5 + 0.5;
-                    
-                    if(projCoords.z <= 1.0 && projCoords.x >= 0.0 && projCoords.x <= 1.0 && projCoords.y >= 0.0 && projCoords.y <= 1.0) {
-                        float pcfDepth = texture(shadowMap, projCoords.xy).r;
-                        if (projCoords.z <= pcfDepth + 0.002) {
-                            volumetric += scattering;
-                        }
-                    }
+                    volumetric += scattering * ShadowVisibilityAt(currentPos);
                     currentPos += rayDir * stepSize;
                 }
             }
 
             // Emission is unlit radiance leaving the surface, so it is added after all
             // shading and is unaffected by shadowing or ambient occlusion.
-            vec3 color = ambient + Lo + albedo * emissive
+            // Emission is tinted by its own colour, not by albedo. Multiplying by
+            // albedo meant a white housing could only glow white and a black one
+            // could not glow at all - a lamp is the obvious case that broke.
+            vec3 color = ambient + Lo + albedo * emissionColor * emissive
                        + (uNumLights > 0 ? volumetric * uLights[0].color : vec3(0.0));
 
             // Aerial perspective. Distant surfaces are seen through kilometres of air
@@ -870,6 +1101,18 @@ bool Renderer::initialize(int width, int height) {
                 fogColor = mix(fogColor, fogColor * 1.6 + sunTint * 0.35, sunAmount);
 
                 color = mix(color, fogColor, clamp(fogAmount, 0.0, 1.0));
+            }
+
+            // Cascade visualisation. Multiplies rather than replaces, so shadow and
+            // surface detail stay readable underneath the tint and it is obvious
+            // whether a split lands where it was meant to.
+            if (uShadowCascadeDebug) {
+                vec3 tint = vec3(0.45);   // past the shadow distance
+                if      (shadowCascade == 0) tint = vec3(1.0, 0.35, 0.35);
+                else if (shadowCascade == 1) tint = vec3(0.35, 1.0, 0.4);
+                else if (shadowCascade == 2) tint = vec3(0.4, 0.55, 1.0);
+                else if (shadowCascade == 3) tint = vec3(1.0, 0.9, 0.35);
+                color *= tint;
             }
 
             if (uLightDebug != 0) {
@@ -927,6 +1170,11 @@ bool Renderer::initialize(int width, int height) {
     ue4_lighting_location = glGetUniformLocation(geometry_shader_program, "uEnableUE4Lighting");
     has_diffuse_texture_location = glGetUniformLocation(geometry_shader_program, "uHasDiffuseTexture");
     diffuse_texture_location = glGetUniformLocation(geometry_shader_program, "uDiffuseTexture");
+    has_normal_map_location = glGetUniformLocation(geometry_shader_program, "uHasNormalMap");
+    normal_map_location = glGetUniformLocation(geometry_shader_program, "uNormalMap");
+    normal_strength_location = glGetUniformLocation(geometry_shader_program, "uNormalStrength");
+    emission_color_location = glGetUniformLocation(geometry_shader_program, "uEmissionColor");
+    specular_tint_location = glGetUniformLocation(geometry_shader_program, "uSpecularTint");
     clearcoat_location = glGetUniformLocation(geometry_shader_program, "uClearcoat");
     clearcoat_roughness_location = glGetUniformLocation(geometry_shader_program, "uClearcoatRoughness");
     sheen_location = glGetUniformLocation(geometry_shader_program, "uSheen");
@@ -969,6 +1217,7 @@ bool Renderer::initialize(int width, int height) {
     glUniform1i(glGetUniformLocation(lighting_shader_program, "gAlbedoSpec"), 2);
     glUniform1i(glGetUniformLocation(lighting_shader_program, "gPBR"), 3);
     glUniform1i(glGetUniformLocation(lighting_shader_program, "gBakedGI"), 12);
+    glUniform1i(glGetUniformLocation(lighting_shader_program, "gMaterial"), 13);
     glUniform1i(glGetUniformLocation(lighting_shader_program, "shadowMap"), 4);
     glUniform1i(glGetUniformLocation(lighting_shader_program, "uEnvironmentMap"), 5);
     glUniform1i(glGetUniformLocation(lighting_shader_program, "uIrradianceMap"), 6);
@@ -1942,6 +2191,7 @@ bool Renderer::initialize(int width, int height) {
     profiler.initialize();
     report_loading_progress("Initialising render targets");
     init_ssao_shaders();
+    init_vxgi();
     report_loading_progress();
     init_bloom_shaders();
     init_slr_shader();
@@ -2235,6 +2485,7 @@ layout (location = 1) out vec4 gNormal;
 layout (location = 2) out vec4 gAlbedoSpec;
 layout (location = 3) out vec4 gPBR;
 layout (location = 4) out vec4 gBakedGI;
+layout (location = 5) out vec4 gMaterial;
 
 in vec3 FragPos;
 in vec3 Normal;
@@ -2293,6 +2544,7 @@ void main() {
          baked += (n.y >= 0.0 ? uAmbientCube[2] : uAmbientCube[3]) * sq.y;
          baked += (n.z >= 0.0 ? uAmbientCube[4] : uAmbientCube[5]) * sq.z;
     gBakedGI = vec4(baked, 1.0);
+    gMaterial = vec4(1.0, 1.0, 1.0, 0.0);
 }
 )";
 
@@ -2434,6 +2686,7 @@ layout (location = 1) out vec4 gNormal;
 layout (location = 2) out vec4 gAlbedoSpec;
 layout (location = 3) out vec4 gPBR;
 layout (location = 4) out vec4 gBakedGI;
+layout (location = 5) out vec4 gMaterial;
 
 in vec3 FragPos;
 in vec3 Normal;
@@ -2463,6 +2716,7 @@ void main() {
          baked += (n.y >= 0.0 ? uAmbientCube[2] : uAmbientCube[3]) * sq.y;
          baked += (n.z >= 0.0 ? uAmbientCube[4] : uAmbientCube[5]) * sq.z;
     gBakedGI = vec4(baked, 1.0);
+    gMaterial = vec4(1.0, 1.0, 1.0, 0.0);
 }
 )";
 
@@ -2641,21 +2895,77 @@ void Renderer::setup_quad() {
 }
 
 void Renderer::init_shadow_map() {
-    glGenFramebuffers(1, &shadow_fbo);
-    glGenTextures(1, &shadow_depth_map);
-    glBindTexture(GL_TEXTURE_2D, shadow_depth_map);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT, 4096, 4096, 0, GL_DEPTH_COMPONENT, GL_FLOAT, NULL);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
-    float borderColor[] = { 1.0, 1.0, 1.0, 1.0 };
-    glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, borderColor);
+    if (lithium_glFramebufferTextureLayer == nullptr) {
+        lithium_glFramebufferTextureLayer =
+            reinterpret_cast<PFNGLFRAMEBUFFERTEXTURELAYERLITHPROC>(
+                SDL_GL_GetProcAddress("glFramebufferTextureLayer"));
+        if (lithium_glFramebufferTextureLayer == nullptr) {
+            std::cerr << "[Renderer] glFramebufferTextureLayer unavailable; "
+                         "cascaded shadow maps cannot be rendered." << std::endl;
+            return;
+        }
+    }
+
+    const int resolution = std::clamp(shadow_map_resolution, 256, 8192);
+    shadow_map_resolution = resolution;
+    if (allocated_shadow_resolution == resolution && shadow_depth_array != 0) return;
+
+    if (shadow_depth_array != 0) {
+        glDeleteTextures(1, &shadow_depth_array);
+        shadow_depth_array = 0;
+    }
+    if (shadow_fbo == 0) glGenFramebuffers(1, &shadow_fbo);
+
+    glGenTextures(1, &shadow_depth_array);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_depth_array);
+    // DEPTH_COMPONENT24 rather than 32F: four layers at 2048 is 67 MB either way on
+    // a driver that pads 24-bit depth to 32, and this GPU renders out of system RAM,
+    // so the per-frame clear bandwidth is the binding cost. 24 bits over a cascade's
+    // few-hundred-unit depth range is ~1e-5 units per step, far finer than the bias.
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_DEPTH_COMPONENT24,
+                 resolution, resolution, kShadowCascades,
+                 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    // Border, not clamp-to-edge: a fragment that lands outside a cascade must read
+    // "nothing in front of me" (depth 1.0), not the nearest edge texel, which would
+    // smear whatever object happens to sit at the map's rim across everything past
+    // it. The shader also rejects out-of-range coordinates outright; this is the
+    // second line of defence for the filter taps, which can step over the edge.
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_EDGE);
+    const float borderColor[] = { 1.0f, 1.0f, 1.0f, 1.0f };
+    glTexParameterfv(GL_TEXTURE_2D_ARRAY, GL_TEXTURE_BORDER_COLOR, borderColor);
+    glBindTexture(GL_TEXTURE_2D_ARRAY, 0);
+
     glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
-    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, shadow_depth_map, 0);
     glDrawBuffer(GL_NONE);
     glReadBuffer(GL_NONE);
+    // Clear every layer once. TESLA skips the shadow pass entirely, and so does a
+    // frame with no directional light, so an unwritten layer would otherwise be
+    // sampled as uninitialised memory rather than as "unoccluded".
+    for (int cascade = 0; cascade < kShadowCascades; ++cascade) {
+        lithium_glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                          shadow_depth_array, 0, cascade);
+        glViewport(0, 0, resolution, resolution);
+        glClear(GL_DEPTH_BUFFER_BIT);
+    }
+    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        std::cerr << "[Renderer] Shadow cascade framebuffer incomplete (0x"
+                  << std::hex << status << std::dec << ")" << std::endl;
+    }
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    allocated_shadow_resolution = resolution;
+
+    // The debug tint is genuinely useful without a UI in reach - a capture script
+    // has no way to click a checkbox - so it also honours an environment variable.
+    static const bool debug_from_env = [] {
+        const char* v = std::getenv("LITHIUM_CSM_DEBUG");
+        return v != nullptr && v[0] != '0';
+    }();
+    if (debug_from_env) debug_shadow_cascades = true;
 }
 
 void Renderer::init_particle_shader() {
@@ -2880,7 +3190,15 @@ void Renderer::render_particles(const std::vector<ParticleInstance>& instances, 
 }
 
 
-void Renderer::begin_shadow_pass() {
+// Rebuilds every cascade's fit for the current camera and sun. Called once per
+// frame from begin_shadow_pass(0).
+//
+// Each cascade is fitted to the *bounding sphere* of its slice of the view frustum,
+// not to the slice's bounding box. A sphere is invariant under rotation, so the
+// cascade's world extent - and therefore its world-units-per-texel - stays constant
+// as the camera turns. A box fit changes size through a turn, which rescales the
+// depth quantisation every frame and makes every shadow edge crawl.
+void Renderer::update_shadow_cascades() {
     Vector3 light_direction = {0.5f, -1.0f, 0.5f};
     for (auto* l : lights) {
         if (auto dir_l = dynamic_cast<DirectionalLightComponent*>(l)) {
@@ -2888,46 +3206,150 @@ void Renderer::begin_shadow_pass() {
             break;
         }
     }
+    light_direction = light_direction.normalized();
 
-    // The shadow map used to cover a 500x500 world-unit box. At 4096 texels that is
-    // ~0.12 units per texel, so anything at human/prop scale had its shadow resolved
-    // by a handful of texels and came out as a soft blob no amount of filtering could
-    // rescue. Covering a much smaller region around the camera puts the same 4096
-    // texels where they are actually visible.
-    const float shadow_map_resolution = 4096.0f;
-    float near_plane = -300.0f, far_plane = 300.0f;
-    float size = 40.0f;
-    shadow_depth_range = far_plane - near_plane;
-    shadow_texel_world_size = (2.0f * size) / shadow_map_resolution;
-    Matrix4x4 lightProjection = Matrix4x4::orthographic(-size, size, -size, size, near_plane, far_plane);
+    // Frustum shape comes from the projection matrix rather than from stored fov /
+    // aspect fields, so the cascades always match the projection actually in use -
+    // including the editor's, which differs from the game camera's.
+    const std::array<float, 16>& p = projection_matrix.m;
+    const float tan_half_h = (std::fabs(p[0]) > 1e-6f) ? 1.0f / std::fabs(p[0]) : 1.0f;
+    const float tan_half_v = (std::fabs(p[5]) > 1e-6f) ? 1.0f / std::fabs(p[5]) : 1.0f;
+    // Standard perspective matrix: m[10] = -(f+n)/(f-n), m[14] = -2fn/(f-n).
+    float near_dist = 0.1f;
+    const float denom_near = p[10] - 1.0f;
+    const float denom_far  = p[10] + 1.0f;
+    if (std::fabs(denom_near) > 1e-6f) near_dist = p[14] / denom_near;
+    if (near_dist <= 0.0f) near_dist = 0.1f;
+    float far_dist = shadow_distance;
+    if (std::fabs(denom_far) > 1e-6f) {
+        const float proj_far = p[14] / denom_far;
+        // Shadows stop at shadow_distance even when the camera sees much further:
+        // stretching four cascades over a 10 km far plane would leave the near field
+        // with almost no texels.
+        if (proj_far > 0.0f) far_dist = std::min(shadow_distance, proj_far);
+    }
+    if (far_dist <= near_dist) far_dist = near_dist + 1.0f;
 
-    // The camera is the origin of camera-relative space, so the light volume is
-    // centred on the origin here rather than on the absolute camera position.
-    Vector3 target = { 0.0f, 0.0f, 0.0f };
-    Vector3 lightPos = { -light_direction.x * 150.0f, -light_direction.y * 150.0f, -light_direction.z * 150.0f };
-    Matrix4x4 lightView = Matrix4x4::look_at(lightPos, target, {0,1,0});
-    light_space_matrix = lightProjection * lightView;
+    // Practical split scheme: a blend of uniform and logarithmic spacing. Uniform
+    // starves the near field where the eye actually looks; pure logarithmic spends a
+    // whole cascade on the first metre.
+    const float range = far_dist - near_dist;
+    const float ratio = far_dist / near_dist;
+    float slice_near = near_dist;
+    for (int i = 0; i < kShadowCascades; ++i) {
+        const float fraction = static_cast<float>(i + 1) / static_cast<float>(kShadowCascades);
+        const float log_split = near_dist * std::pow(ratio, fraction);
+        const float uni_split = near_dist + range * fraction;
+        const float split = shadow_split_lambda * log_split +
+                            (1.0f - shadow_split_lambda) * uni_split;
+        cascade_split_depth[i] = split;
 
-    // Stabilisation: snap the light-space origin to whole shadow-map texels. Without
-    // this the map slides by sub-texel amounts as the camera moves, and every shadow
-    // edge crawls and shimmers because each frame quantises the depth test differently.
-    Vector3 shadow_origin = light_space_matrix * Vector3{0.0f, 0.0f, 0.0f};
-    float origin_x = shadow_origin.x * shadow_map_resolution * 0.5f;
-    float origin_y = shadow_origin.y * shadow_map_resolution * 0.5f;
-    float offset_x = (std::round(origin_x) - origin_x) * 2.0f / shadow_map_resolution;
-    float offset_y = (std::round(origin_y) - origin_y) * 2.0f / shadow_map_resolution;
-    Matrix4x4 snap = Matrix4x4::identity();
-    snap.m[12] = offset_x;
-    snap.m[13] = offset_y;
-    light_space_matrix = snap * light_space_matrix;
+        // Minimal enclosing sphere of the slice, centred on the view axis. Equating
+        // the distance to a near corner and to a far corner gives the centre depth
+        // in closed form; see the derivation in the shadow notes.
+        const float a = tan_half_h * tan_half_h + tan_half_v * tan_half_v;
+        float centre_depth = (a + 1.0f) * (split + slice_near) * 0.5f;
+        // When the solved centre falls beyond the far plane the far circle alone
+        // bounds the slice, and the sphere sits on that plane instead.
+        if (centre_depth > split) centre_depth = split;
+        const float dz = centre_depth - split;
+        float radius = std::sqrt(split * split * a + dz * dz);
+        if (radius < 1e-3f) radius = 1e-3f;
+        cascade_radius[i] = radius;
 
-    glViewport(0, 0, 4096, 4096);
+        // View space -> camera-relative world space. Geometry is submitted relative
+        // to the camera, so this is the space the shadow pass draws in.
+        Matrix4x4 inv_view = view_matrix.inverse();
+        const Vector3 centre = inv_view * Vector3{0.0f, 0.0f, -centre_depth};
+
+        // Pull the light back far enough to catch casters standing outside the slice
+        // but still between it and the sun. Scaled by radius so it holds at every
+        // cascade size rather than being tuned for one of them.
+        const float extrusion = radius * 4.0f + 50.0f;
+        cascade_extrusion[i] = extrusion;
+
+        // A light pointing straight down is parallel to the usual up vector, which
+        // would collapse look_at's basis; swing the reference axis in that case.
+        const Vector3 up = (std::fabs(light_direction.y) > 0.99f)
+                               ? Vector3{0.0f, 0.0f, 1.0f}
+                               : Vector3{0.0f, 1.0f, 0.0f};
+        const Vector3 eye = centre - light_direction * extrusion;
+        Matrix4x4 light_view = Matrix4x4::look_at(eye, centre, up);
+        cascade_light_view[i] = light_view;
+
+        const float depth_span = extrusion + radius;
+        cascade_depth_range[i] = depth_span;
+        cascade_texel_world[i] = (2.0f * radius) / static_cast<float>(shadow_map_resolution);
+
+        Matrix4x4 light_proj = Matrix4x4::orthographic(-radius, radius, -radius, radius,
+                                                       0.0f, depth_span);
+        Matrix4x4 light_space = light_proj * light_view;
+
+        // Stabilisation: snap the cascade's origin to whole shadow-map texels.
+        // Without it the map slides by sub-texel amounts as the camera moves and
+        // every shadow edge shimmers, because each frame quantises the depth test on
+        // a slightly different grid.
+        const float res = static_cast<float>(shadow_map_resolution);
+        const Vector3 origin = light_space * Vector3{0.0f, 0.0f, 0.0f};
+        const float ox = origin.x * res * 0.5f;
+        const float oy = origin.y * res * 0.5f;
+        Matrix4x4 snap = Matrix4x4::identity();
+        snap.m[12] = (std::round(ox) - ox) * 2.0f / res;
+        snap.m[13] = (std::round(oy) - oy) * 2.0f / res;
+        cascade_light_space[i] = snap * light_space;
+
+        slice_near = split;
+    }
+
+    // The deferred lighting pass reads the cascade array, but a few vestigial
+    // uniforms still expect a single matrix. Cascade 0 is the closest match.
+    light_space_matrix = cascade_light_space[0];
+}
+
+// Rejects a caster that cannot contribute to the cascade currently being drawn.
+// Called per caster per cascade, so it stays a cheap sphere test rather than a
+// full frustum-vs-bounds check.
+bool Renderer::cascade_accepts_caster(const Vector3& center_relative, float radius) const {
+    const int cascade = active_shadow_cascade;
+    if (cascade < 0 || cascade >= kShadowCascades) return true;
+
+    // Into the cascade's light space, where the ortho volume is an axis-aligned box:
+    // x and y span [-r, r] and z spans [0, extrusion + r] along the light.
+    const Vector3 local = cascade_light_view[cascade] * center_relative;
+    const float extent = cascade_radius[cascade] + radius;
+    if (std::fabs(local.x) > extent) return false;
+    if (std::fabs(local.y) > extent) return false;
+
+    // look_at builds a right-handed basis looking down -z, so a point in front of
+    // the light has negative z and its depth along the light is -z.
+    const float depth = -local.z;
+    if (depth < -radius) return false;
+    if (depth > cascade_extrusion[cascade] + cascade_radius[cascade] + radius) return false;
+    return true;
+}
+
+void Renderer::begin_shadow_pass(int cascade) {
+    if (cascade < 0) cascade = 0;
+    if (cascade >= kShadowCascades) cascade = kShadowCascades - 1;
+
+    // Refit once per frame, on the first cascade. Doing it per cascade would redo
+    // the same frustum solve four times for the same answer.
+    if (cascade == 0) update_shadow_cascades();
+    active_shadow_cascade = cascade;
+
+    if (shadow_depth_array == 0 || lithium_glFramebufferTextureLayer == nullptr) return;
+
     glBindFramebuffer(GL_FRAMEBUFFER, shadow_fbo);
+    lithium_glFramebufferTextureLayer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT,
+                                      shadow_depth_array, 0, cascade);
+    glViewport(0, 0, shadow_map_resolution, shadow_map_resolution);
     glClear(GL_DEPTH_BUFFER_BIT);
     glUseProgram(depth_shader_program);
-    glUniformMatrix4fv(depth_light_space_location, 1, GL_FALSE, light_space_matrix.m.data());
-    
-    // Enable front face culling for shadow map generation to prevent peter-panning and self-shadowing artifacts
+    glUniformMatrix4fv(depth_light_space_location, 1, GL_FALSE,
+                       cascade_light_space[cascade].m.data());
+
+    // Front-face culling while filling the map: it moves the depth samples to the
+    // far side of each caster, which keeps self-shadowing acne off the lit side.
     glCullFace(GL_FRONT);
 }
 
@@ -2935,6 +3357,518 @@ void Renderer::end_shadow_pass() {
     glCullFace(GL_BACK); // Restore default back-face culling
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
     glUseProgram(0);
+}
+
+
+// ===========================================================================
+//  VXGI - voxel cone traced global illumination
+//
+//  Three steps, once the volume needs rebuilding:
+//
+//    1. Voxelise. The scene is rasterised a third time (after the shadow map and
+//       the G-buffer) into a 3D grid. Each fragment computes its own direct
+//       lighting - sun, shadow, emissive - and writes that radiance into the
+//       voxel it falls in. What lands in the grid is therefore *outgoing* light,
+//       which is what a later bounce needs to gather.
+//
+//    2. Filter. Mip the grid. A cone of a given width at a given distance reads
+//       the mip whose voxels are that wide, so one texture fetch stands in for
+//       the cone's whole cross-section instead of many.
+//
+//    3. Cone trace. In the SSAO/SSGI pass, march a handful of cones out from each
+//       pixel over the hemisphere and accumulate what they hit. This is the step
+//       that is not screen-space: a cone walks the voxel grid, which holds the
+//       whole scene, so light off a wall behind the camera arrives normally.
+//
+//  The rasterisation trick in step 1 is the dominant-axis projection in the
+//  geometry shader. A triangle rasterises into the most fragments - and therefore
+//  fills the most voxels - when viewed down the axis its normal is most aligned
+//  with, so each triangle is projected along whichever of x/y/z that is. Without
+//  it, a triangle edge-on to the projection produces almost no fragments and
+//  leaves a hole in the grid.
+// ===========================================================================
+
+bool Renderer::vxgi_active() const {
+    return gi_mode == GIMode::VXGI && vxgi_available && voxel_radiance_texture != 0;
+}
+
+void Renderer::init_voxelize_shaders() {
+    // Image load/store is the hard requirement. It is core in 4.2, but the driver
+    // on the minimum-target part advertises 4.5 and provides neither it nor
+    // compute, so the entry points are what decide this, not the version string.
+    if (glBindImageTexture == nullptr || glMemoryBarrier == nullptr) {
+        std::cout << "[Renderer] Image load/store unavailable on this driver; "
+                     "VXGI disabled (Global Illumination falls back to SSGI)." << std::endl;
+        return;
+    }
+
+    // Having the entry point is not the same as being able to use it. Sandy Bridge
+    // under Mesa exports glBindImageTexture and advertises a 4.5 context, but
+    // reports GL_MAX_FRAGMENT_IMAGE_UNIFORMS = 0 - a fragment shader there cannot
+    // write an image at all, which is precisely what voxelisation does. Without
+    // this probe the shaders build and the program fails at link with "Too many
+    // fragment shader image uniforms (1 > 0)", which reads like a bug in the
+    // shader rather than a hardware limit.
+    GLint max_fragment_images = 0;
+    GLint max_compute_images = 0;
+    glGetIntegerv(GL_MAX_FRAGMENT_IMAGE_UNIFORMS, &max_fragment_images);
+    glGetIntegerv(GL_MAX_COMPUTE_IMAGE_UNIFORMS, &max_compute_images);
+    // A driver that does not know the enum leaves the value untouched and raises
+    // GL_INVALID_ENUM; clear it so the next unrelated glGetError is not confused.
+    while (glGetError() != GL_NO_ERROR) {}
+    if (max_fragment_images < 1 || max_compute_images < 2) {
+        std::cout << "[Renderer] This GPU allows " << max_fragment_images
+                  << " fragment and " << max_compute_images
+                  << " compute image uniforms; VXGI needs at least 1 and 2. "
+                     "Global Illumination falls back to SSGI." << std::endl;
+        return;
+    }
+
+    const std::string voxel_vert = R"(
+        #version 450 core
+        layout (location = 0) in vec3 aPos;
+        layout (location = 1) in vec3 aNormal;
+        layout (location = 4) in ivec4 aBoneIDs;
+        layout (location = 5) in vec4 aWeights;
+
+        uniform mat4 uModel;
+        const int MAX_BONES = 128;
+        uniform bool uSkinned;
+        uniform mat4 uBones[MAX_BONES];
+
+        out vec3 vWorldPos;
+        out vec3 vNormal;
+
+        void main() {
+            vec3 position = aPos;
+            vec3 normal = aNormal;
+            if (uSkinned) {
+                float total = aWeights.x + aWeights.y + aWeights.z + aWeights.w;
+                if (total > 0.0) {
+                    mat4 skin = mat4(0.0);
+                    for (int i = 0; i < 4; ++i) {
+                        int index = clamp(aBoneIDs[i], 0, MAX_BONES - 1);
+                        skin += uBones[index] * aWeights[i];
+                    }
+                    skin /= total;
+                    position = (skin * vec4(aPos, 1.0)).xyz;
+                    normal = mat3(skin) * aNormal;
+                }
+            }
+            // Camera-relative world space, the same space the grid is defined in.
+            vWorldPos = (uModel * vec4(position, 1.0)).xyz;
+            vNormal = normalize(mat3(uModel) * normal);
+            gl_Position = vec4(vWorldPos, 1.0);
+        }
+    )";
+
+    const std::string voxel_geom = R"(
+        #version 450 core
+        layout (triangles) in;
+        layout (triangle_strip, max_vertices = 3) out;
+
+        in vec3 vWorldPos[];
+        in vec3 vNormal[];
+
+        out vec3 gWorldPos;
+        out vec3 gNormal;
+
+        uniform vec3 uVoxelOrigin;   // grid corner, camera-relative world space
+        uniform float uVoxelExtent;  // world side length of the whole grid
+
+        void main() {
+            // Project along whichever axis the triangle faces most directly. That is
+            // the axis it covers the most fragments down, and a fragment is what
+            // writes a voxel - so this is what keeps a wall from disappearing out of
+            // the grid because it happens to be edge-on to a fixed projection.
+            vec3 edge0 = vWorldPos[1] - vWorldPos[0];
+            vec3 edge1 = vWorldPos[2] - vWorldPos[0];
+            vec3 faceNormal = abs(cross(edge0, edge1));
+
+            for (int i = 0; i < 3; ++i) {
+                // Grid space in [0, 1], then to clip space.
+                vec3 grid = (vWorldPos[i] - uVoxelOrigin) / uVoxelExtent;
+                vec3 ndc = grid * 2.0 - 1.0;
+
+                if (faceNormal.z >= faceNormal.x && faceNormal.z >= faceNormal.y) {
+                    gl_Position = vec4(ndc.x, ndc.y, 0.0, 1.0);
+                } else if (faceNormal.x >= faceNormal.y) {
+                    gl_Position = vec4(ndc.y, ndc.z, 0.0, 1.0);
+                } else {
+                    gl_Position = vec4(ndc.x, ndc.z, 0.0, 1.0);
+                }
+
+                gWorldPos = vWorldPos[i];
+                gNormal = vNormal[i];
+                EmitVertex();
+            }
+            EndPrimitive();
+        }
+    )";
+
+    // The fragment shader lights the voxel itself. Storing albedo and lighting it
+    // later would need a second full pass over the grid; storing outgoing radiance
+    // directly means the cone trace can simply read and accumulate.
+    const std::string voxel_frag = R"(
+        #version 450 core
+
+        in vec3 gWorldPos;
+        in vec3 gNormal;
+
+        layout (r32ui) uniform coherent volatile uimage3D uVoxelGrid;
+
+        uniform vec3 uVoxelOrigin;
+        uniform float uVoxelExtent;
+        uniform int uVoxelResolution;
+
+        uniform vec3 uAlbedo;
+        uniform float uEmissive;
+        uniform vec3 uLightDir;      // direction the light travels
+        uniform vec3 uLightColor;
+        uniform float uLightIntensity;
+
+        // Packs into 8 bits per channel with a 2-bit-ish headroom: radiance is
+        // divided by a fixed range first, so a bright emissive surface saturates
+        // rather than wrapping around into a dark voxel.
+        const float kRadianceRange = 8.0;
+
+        uint packRadiance(vec3 color) {
+            vec3 c = clamp(color / kRadianceRange, 0.0, 1.0) * 255.0;
+            return (uint(255) << 24) | (uint(c.b) << 16) | (uint(c.g) << 8) | uint(c.r);
+        }
+
+        void main() {
+            vec3 grid = (gWorldPos - uVoxelOrigin) / uVoxelExtent;
+            if (any(lessThan(grid, vec3(0.0))) || any(greaterThan(grid, vec3(1.0)))) return;
+
+            ivec3 coord = ivec3(grid * float(uVoxelResolution));
+            coord = clamp(coord, ivec3(0), ivec3(uVoxelResolution - 1));
+
+            // Direct lighting only. The bounce is what the cone trace adds later;
+            // computing it here as well would be gathering light that has not been
+            // stored yet.
+            vec3 normal = normalize(gNormal);
+            float ndotl = max(dot(normal, -uLightDir), 0.0);
+            vec3 radiance = uAlbedo * uLightColor * uLightIntensity * ndotl;
+            radiance += uAlbedo * uEmissive;
+
+            // Atomic max, not a plain store. Several triangles routinely land in one
+            // voxel, and with a plain store whichever fragment happened to finish
+            // last would win - a different one each frame, which shows up as the
+            // indirect light flickering. Max is order-independent, so the answer is
+            // the same every frame for the same geometry.
+            imageAtomicMax(uVoxelGrid, coord, packRadiance(radiance));
+        }
+    )";
+
+    auto compile_stage = [](GLenum type, const std::string& src, const char* name,
+                            const char* stage) -> unsigned int {
+        unsigned int shader = glCreateShader(type);
+        if (shader == 0) return 0;
+        const char* text = src.c_str();
+        glShaderSource(shader, 1, &text, nullptr);
+        glCompileShader(shader);
+        if (!report_shader_compile(shader, name, stage)) {
+            glDeleteShader(shader);
+            return 0;
+        }
+        return shader;
+    };
+
+    const unsigned int vs = compile_stage(GL_VERTEX_SHADER, voxel_vert, "voxelize", "vertex");
+    const unsigned int gs = compile_stage(GL_GEOMETRY_SHADER, voxel_geom, "voxelize", "geometry");
+    const unsigned int fs = compile_stage(GL_FRAGMENT_SHADER, voxel_frag, "voxelize", "fragment");
+    if (vs == 0 || gs == 0 || fs == 0) {
+        if (vs) glDeleteShader(vs);
+        if (gs) glDeleteShader(gs);
+        if (fs) glDeleteShader(fs);
+        std::cout << "[Renderer] Voxelisation shaders failed to build; VXGI disabled." << std::endl;
+        return;
+    }
+
+    unsigned int program = glCreateProgram();
+    glAttachShader(program, vs);
+    glAttachShader(program, gs);
+    glAttachShader(program, fs);
+    glLinkProgram(program);
+    const bool linked = report_program_link(program, "voxelize");
+    glDeleteShader(vs);
+    glDeleteShader(gs);
+    glDeleteShader(fs);
+    if (!linked) {
+        glDeleteProgram(program);
+        std::cout << "[Renderer] Voxelisation program failed to link; VXGI disabled." << std::endl;
+        return;
+    }
+    voxelize_shader_program = program;
+
+    // Resolve: unpack the atomically-written integer grid into the filterable
+    // float one the cone trace samples. A compute shader rather than a draw
+    // because the destination is a 3D texture with no natural fragment to render.
+    const std::string resolve_src = R"(
+        #version 450 core
+        layout (local_size_x = 4, local_size_y = 4, local_size_z = 4) in;
+
+        layout (r32ui) uniform readonly uimage3D uVoxelGrid;
+        layout (rgba16f) uniform writeonly image3D uVoxelRadiance;
+        uniform int uVoxelResolution;
+
+        const float kRadianceRange = 8.0;
+
+        void main() {
+            ivec3 coord = ivec3(gl_GlobalInvocationID);
+            if (any(greaterThanEqual(coord, ivec3(uVoxelResolution)))) return;
+
+            uint packed = imageLoad(uVoxelGrid, coord).r;
+            vec4 result = vec4(0.0);
+            if (packed != 0u) {
+                float r = float(packed & 0xFFu);
+                float g = float((packed >> 8) & 0xFFu);
+                float b = float((packed >> 16) & 0xFFu);
+                // Alpha is coverage, and it is what the cone trace accumulates
+                // occlusion from: a voxel nothing was written into stays fully
+                // transparent and a cone passes straight through it.
+                result = vec4(vec3(r, g, b) / 255.0 * kRadianceRange, 1.0);
+            }
+            imageStore(uVoxelRadiance, coord, result);
+        }
+    )";
+
+    unsigned int cs = glDispatchCompute ? glCreateShader(GL_COMPUTE_SHADER) : 0;
+    if (cs == 0) {
+        std::cout << "[Renderer] Compute unavailable; VXGI disabled." << std::endl;
+        glDeleteProgram(voxelize_shader_program);
+        voxelize_shader_program = 0;
+        return;
+    }
+    const char* resolve_text = resolve_src.c_str();
+    glShaderSource(cs, 1, &resolve_text, nullptr);
+    glCompileShader(cs);
+    if (!report_shader_compile(cs, "voxel_resolve", "compute")) {
+        glDeleteShader(cs);
+        glDeleteProgram(voxelize_shader_program);
+        voxelize_shader_program = 0;
+        std::cout << "[Renderer] Voxel resolve shader failed; VXGI disabled." << std::endl;
+        return;
+    }
+    unsigned int resolve_program = glCreateProgram();
+    glAttachShader(resolve_program, cs);
+    glLinkProgram(resolve_program);
+    const bool resolve_linked = report_program_link(resolve_program, "voxel_resolve");
+    glDeleteShader(cs);
+    if (!resolve_linked) {
+        glDeleteProgram(resolve_program);
+        glDeleteProgram(voxelize_shader_program);
+        voxelize_shader_program = 0;
+        std::cout << "[Renderer] Voxel resolve program failed to link; VXGI disabled." << std::endl;
+        return;
+    }
+    voxel_resolve_program = resolve_program;
+}
+
+void Renderer::init_vxgi() {
+    init_voxelize_shaders();
+    if (voxelize_shader_program == 0 || voxel_resolve_program == 0) {
+        vxgi_available = false;
+        return;
+    }
+
+    const int resolution = std::clamp(voxel_resolution, 16, 256);
+    voxel_resolution = resolution;
+    if (allocated_voxel_resolution == resolution && voxel_radiance_texture != 0) {
+        vxgi_available = true;
+        return;
+    }
+
+    if (voxel_radiance_texture != 0) { glDeleteTextures(1, &voxel_radiance_texture); voxel_radiance_texture = 0; }
+    if (voxel_accum_texture != 0)    { glDeleteTextures(1, &voxel_accum_texture);    voxel_accum_texture = 0; }
+
+    glGenTextures(1, &voxel_radiance_texture);
+    glBindTexture(GL_TEXTURE_3D, voxel_radiance_texture);
+    // Trilinear across mips: a cone step lands between two mip levels as often as
+    // on one, and without the interpolation the indirect light bands visibly where
+    // a cone crosses from one level to the next.
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    // Clamp to border with a transparent border, so a cone leaving the grid gathers
+    // nothing rather than smearing the edge voxels outward forever.
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_WRAP_R, GL_CLAMP_TO_BORDER);
+    const float border[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    glTexParameterfv(GL_TEXTURE_3D, GL_TEXTURE_BORDER_COLOR, border);
+
+    int mip_levels = 1;
+    for (int size = resolution; size > 1; size >>= 1) ++mip_levels;
+    if (glTexStorage3D) {
+        glTexStorage3D(GL_TEXTURE_3D, mip_levels, GL_RGBA16F, resolution, resolution, resolution);
+    } else {
+        int size = resolution;
+        for (int level = 0; level < mip_levels; ++level) {
+            glTexImage3D(GL_TEXTURE_3D, level, GL_RGBA16F, size, size, size, 0,
+                         GL_RGBA, GL_FLOAT, nullptr);
+            size = std::max(1, size >> 1);
+        }
+    }
+
+    glGenTextures(1, &voxel_accum_texture);
+    glBindTexture(GL_TEXTURE_3D, voxel_accum_texture);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_3D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    if (glTexStorage3D) {
+        glTexStorage3D(GL_TEXTURE_3D, 1, GL_R32UI, resolution, resolution, resolution);
+    } else {
+        glTexImage3D(GL_TEXTURE_3D, 0, GL_R32UI, resolution, resolution, resolution, 0,
+                     GL_RED_INTEGER, GL_UNSIGNED_INT, nullptr);
+    }
+    glBindTexture(GL_TEXTURE_3D, 0);
+
+    allocated_voxel_resolution = resolution;
+    voxel_volume_valid = false;
+    voxel_volume_dirty = true;
+    vxgi_available = true;
+
+    const double megabytes =
+        (static_cast<double>(resolution) * resolution * resolution * (8.0 + 4.0)) / (1024.0 * 1024.0);
+    std::cout << "[Renderer] VXGI enabled: " << resolution << "^3 voxel grid over "
+              << voxel_world_extent << " world units ("
+              << static_cast<int>(megabytes) << " MB)." << std::endl;
+}
+
+bool Renderer::begin_voxel_pass() {
+    if (!vxgi_active()) return false;
+
+    // The grid follows the camera, but only in whole-voxel steps, and only once the
+    // camera has moved a meaningful fraction of the volume. Re-voxelising every
+    // frame costs more than the cone tracing does, and static geometry has not moved.
+    const float half_extent = voxel_world_extent * 0.5f;
+    voxel_size = voxel_world_extent / static_cast<float>(voxel_resolution);
+
+    const DVector3 drift = camera_pos - voxel_built_at;
+    const double drift_sq = drift.x * drift.x + drift.y * drift.y + drift.z * drift.z;
+    const double rebuild_distance = static_cast<double>(voxel_world_extent) * 0.25;
+    if (voxel_volume_valid && !voxel_volume_dirty &&
+        drift_sq < rebuild_distance * rebuild_distance) {
+        return false;
+    }
+
+    // The grid is expressed in camera-relative world space, where the camera sits at
+    // the origin, so the corner is simply half the extent back along each axis -
+    // snapped to whole voxels, which is what stops the indirect light crawling as
+    // the camera moves.
+    voxel_origin = { -half_extent, -half_extent, -half_extent };
+    voxel_origin.x = std::floor(voxel_origin.x / voxel_size) * voxel_size;
+    voxel_origin.y = std::floor(voxel_origin.y / voxel_size) * voxel_size;
+    voxel_origin.z = std::floor(voxel_origin.z / voxel_size) * voxel_size;
+
+    // Clear last frame's contents. Without this a voxel written once keeps its
+    // radiance forever, because atomic max never lowers a value.
+    // Uploading a zeroed buffer rather than glClearTexImage, which is 4.4 and is not
+    // among the entry points this renderer loads. It costs a grid-sized transfer,
+    // but only on the frames the volume is actually rebuilt. The buffer is kept
+    // between rebuilds so the allocation is paid once.
+    static std::vector<GLuint> zeros;
+    const size_t needed = static_cast<size_t>(voxel_resolution) * voxel_resolution * voxel_resolution;
+    if (zeros.size() != needed) zeros.assign(needed, 0u);
+    glBindTexture(GL_TEXTURE_3D, voxel_accum_texture);
+    glTexSubImage3D(GL_TEXTURE_3D, 0, 0, 0, 0, voxel_resolution, voxel_resolution,
+                    voxel_resolution, GL_RED_INTEGER, GL_UNSIGNED_INT, zeros.data());
+    glBindTexture(GL_TEXTURE_3D, 0);
+
+    glUseProgram(voxelize_shader_program);
+
+    // Rasterise at grid resolution with every per-fragment test off. The pass has no
+    // colour or depth attachment at all - its entire output is the image writes -
+    // so depth testing would reject fragments against a buffer that does not exist,
+    // and culling would drop the back faces of everything, leaving rooms lit only
+    // from outside.
+    glViewport(0, 0, voxel_resolution, voxel_resolution);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glDisable(GL_DEPTH_TEST);
+    glDepthMask(GL_FALSE);
+    glDisable(GL_CULL_FACE);
+    glColorMask(GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+
+    glBindImageTexture(0, voxel_accum_texture, 0, GL_TRUE, 0, GL_READ_WRITE, GL_R32UI);
+    glUniform1i(glGetUniformLocation(voxelize_shader_program, "uVoxelGrid"), 0);
+    glUniform3f(glGetUniformLocation(voxelize_shader_program, "uVoxelOrigin"),
+                voxel_origin.x, voxel_origin.y, voxel_origin.z);
+    glUniform1f(glGetUniformLocation(voxelize_shader_program, "uVoxelExtent"), voxel_world_extent);
+    glUniform1i(glGetUniformLocation(voxelize_shader_program, "uVoxelResolution"), voxel_resolution);
+
+    Vector3 light_direction = { 0.5f, -1.0f, 0.5f };
+    Vector3 light_color = { 1.0f, 1.0f, 1.0f };
+    float light_intensity = 1.0f;
+    for (auto* l : lights) {
+        if (auto dir_l = dynamic_cast<DirectionalLightComponent*>(l)) {
+            light_direction = dir_l->get_direction();
+            light_color = dir_l->color;
+            light_intensity = dir_l->intensity;
+            break;
+        }
+    }
+    light_direction = light_direction.normalized();
+    glUniform3f(glGetUniformLocation(voxelize_shader_program, "uLightDir"),
+                light_direction.x, light_direction.y, light_direction.z);
+    glUniform3f(glGetUniformLocation(voxelize_shader_program, "uLightColor"),
+                light_color.x, light_color.y, light_color.z);
+    glUniform1f(glGetUniformLocation(voxelize_shader_program, "uLightIntensity"), light_intensity);
+
+    return true;
+}
+
+void Renderer::render_mesh_voxel(const StaticMeshComponent& mesh_component, const Transform& transform,
+                                 const Vector3& albedo, float emissive,
+                                 const std::vector<Matrix4x4>* bone_matrices,
+                                 const MeshResource* lod_mesh) {
+    Matrix4x4 model = transform.get_relative_matrix(camera_pos);
+    glUniformMatrix4fv(glGetUniformLocation(voxelize_shader_program, "uModel"), 1, GL_FALSE,
+                       model.m.data());
+    apply_skinning_uniforms(glGetUniformLocation(voxelize_shader_program, "uSkinned"),
+                            glGetUniformLocation(voxelize_shader_program, "uBones"),
+                            bone_matrices);
+
+    glUniform3f(glGetUniformLocation(voxelize_shader_program, "uAlbedo"),
+                albedo.x, albedo.y, albedo.z);
+    glUniform1f(glGetUniformLocation(voxelize_shader_program, "uEmissive"), emissive);
+
+    profiler.draw_calls++;
+    mesh_component.render(lod_mesh);
+}
+
+void Renderer::end_voxel_pass() {
+    // The image writes have to be visible to the resolve shader's reads. Without
+    // this barrier the resolve can legally observe an empty grid.
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+
+    glUseProgram(voxel_resolve_program);
+    glBindImageTexture(0, voxel_accum_texture, 0, GL_TRUE, 0, GL_READ_ONLY, GL_R32UI);
+    glBindImageTexture(1, voxel_radiance_texture, 0, GL_TRUE, 0, GL_WRITE_ONLY, GL_RGBA16F);
+    glUniform1i(glGetUniformLocation(voxel_resolve_program, "uVoxelGrid"), 0);
+    glUniform1i(glGetUniformLocation(voxel_resolve_program, "uVoxelRadiance"), 1);
+    glUniform1i(glGetUniformLocation(voxel_resolve_program, "uVoxelResolution"), voxel_resolution);
+
+    const unsigned int groups = static_cast<unsigned int>((voxel_resolution + 3) / 4);
+    glDispatchCompute(groups, groups, groups);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT | GL_TEXTURE_FETCH_BARRIER_BIT);
+
+    // The mip chain is the cone trace's whole reason for being cheap: a wide cone
+    // reads a coarse level and gets the average of everything in its footprint from
+    // one fetch.
+    glBindTexture(GL_TEXTURE_3D, voxel_radiance_texture);
+    glGenerateMipmap(GL_TEXTURE_3D);
+    glBindTexture(GL_TEXTURE_3D, 0);
+
+    // Restore the pipeline state the voxel pass turned off.
+    glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+    glEnable(GL_DEPTH_TEST);
+    glDepthMask(GL_TRUE);
+    glEnable(GL_CULL_FACE);
+    glUseProgram(0);
+
+    voxel_built_at = camera_pos;
+    voxel_volume_valid = true;
+    voxel_volume_dirty = false;
 }
 
 bool Renderer::apply_skinning_uniforms(int skinned_uniform, int bones_uniform,
@@ -3010,6 +3944,17 @@ void Renderer::init_ssao_shaders() {
         // shadows for no reason.
         uniform int uGIMode;
 
+        // --- VXGI ------------------------------------------------------------
+        // The voxel grid holds outgoing radiance for the whole scene, so unlike the
+        // screen-space estimator below, a cone can gather light from geometry that
+        // is off screen or hidden behind something else.
+        uniform sampler3D uVoxelRadiance;
+        uniform vec3 uVoxelOrigin;      // grid corner, camera-relative world space
+        uniform float uVoxelExtent;     // world side length of the whole grid
+        uniform float uVoxelSize;       // world size of one voxel at mip 0
+        uniform float uVXGIIntensity;
+        uniform mat4 uInvView;          // view space -> camera-relative world space
+
         vec3 reconstructPosition(vec2 uv, float z) {
             vec4 pos_s = vec4(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0, z * 2.0 - 1.0, 1.0);
             vec4 pos_v = uInvProj * pos_s;
@@ -3022,6 +3967,45 @@ void Renderer::init_ssao_shaders() {
         // instead of forming the coarse blotches a white-noise rotation leaves.
         float interleavedGradientNoise(vec2 p) {
             return fract(52.9829189 * fract(dot(p, vec2(0.06711056, 0.00583715))));
+        }
+
+        // Marches one cone through the voxel grid, front to back.
+        //
+        // The step is the trick: a cone's radius at distance d is d * aperture, so
+        // the mip whose voxels are that wide holds exactly the average of what the
+        // cone covers there. One trilinear fetch per step therefore stands in for
+        // the cone's whole cross-section, and the step length grows with the radius
+        // so the cost is logarithmic in distance rather than linear.
+        vec4 traceCone(vec3 origin, vec3 direction, float aperture) {
+            // Start clear of the surface, or the very first sample lands in the
+            // voxel the shading point itself wrote and every surface shadows itself.
+            float dist = uVoxelSize * 1.5;
+            vec3 accumulated = vec3(0.0);
+            float occlusion = 0.0;
+
+            const int kMaxSteps = 32;
+            for (int i = 0; i < kMaxSteps; ++i) {
+                if (occlusion >= 1.0 || dist >= uVoxelExtent) break;
+
+                float radius = max(dist * aperture, uVoxelSize * 0.5);
+                vec3 position = origin + direction * dist;
+
+                vec3 uvw = (position - uVoxelOrigin) / uVoxelExtent;
+                if (any(lessThan(uvw, vec3(0.0))) || any(greaterThan(uvw, vec3(1.0)))) break;
+
+                // log2 of the cone's width in voxels is the mip that holds it.
+                float mip = clamp(log2(max(2.0 * radius / uVoxelSize, 1.0)), 0.0, 7.0);
+                vec4 sampled = textureLod(uVoxelRadiance, uvw, mip);
+
+                // Front-to-back alpha compositing: what is already occluded cannot
+                // be lit by something further along the cone.
+                float weight = 1.0 - occlusion;
+                accumulated += sampled.rgb * sampled.a * weight;
+                occlusion += sampled.a * weight;
+
+                dist += radius;
+            }
+            return vec4(accumulated, occlusion);
         }
 
         void main() {
@@ -3094,6 +4078,49 @@ void Renderer::init_ssao_shaders() {
             ao = 1.0 - (ao / float(samples));
             ssgi /= float(samples);
             if (uGIMode == 0) ssgi = vec3(0.0);
+
+            // VXGI replaces the screen-space bounce above, and supplies its own
+            // occlusion from the same cones - a cone fully blocked in the grid is a
+            // direction no light arrives from, which is what ambient occlusion
+            // measures. The screen-space AO is kept where it is darker: the voxel
+            // grid is far too coarse to resolve a contact shadow.
+            if (uGIMode == 2) {
+                // Back to camera-relative world space, the space the grid lives in.
+                vec3 worldPos = (uInvView * vec4(viewPos, 1.0)).xyz;
+                vec3 n = normalize(worldNormal);
+
+                // An orthonormal basis around the normal. The branch avoids the
+                // degenerate cross product when the normal is near +/-Y.
+                vec3 up = abs(n.y) < 0.95 ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0);
+                vec3 tangent = normalize(cross(up, n));
+                vec3 bitangent = cross(n, tangent);
+
+                // Six cones over the hemisphere: one up the normal and a ring of
+                // five at 60 degrees. The usual compromise - enough directions that
+                // a flat wall does not band, few enough to afford per pixel.
+                const float kAperture = 0.577;   // tan(30 deg), a 60-degree cone
+                vec3 gathered = vec3(0.0);
+                float coneOcclusion = 0.0;
+
+                vec4 centre = traceCone(worldPos, n, kAperture);
+                gathered += centre.rgb;
+                coneOcclusion += centre.a;
+
+                for (int c = 0; c < 5; ++c) {
+                    float angle = float(c) * 1.2566371;   // 72 degrees apart
+                    vec3 dir = normalize(n * 0.5 +
+                                         (tangent * cos(angle) + bitangent * sin(angle)) * 0.866);
+                    vec4 cone = traceCone(worldPos, dir, kAperture);
+                    float weight = max(dot(dir, n), 0.0);   // cosine weighted
+                    gathered += cone.rgb * weight;
+                    coneOcclusion += cone.a * weight;
+                }
+
+                const float kTotalWeight = 1.0 + 5.0 * 0.5;
+                ssgi = gathered / kTotalWeight * uVXGIIntensity;
+                ao = min(ao, 1.0 - clamp(coneOcclusion / kTotalWeight, 0.0, 1.0));
+            }
+
             FragColor = vec4(ssgi, ao);
         }
     )";
@@ -3573,10 +4600,35 @@ void Renderer::render_ssao() {
     glUniformMatrix4fv(glGetUniformLocation(ssao_shader_program, "uView"), 1, GL_FALSE, view_matrix.m.data());
     glUniform1f(glGetUniformLocation(ssao_shader_program, "uRadius"), 0.6f);
     glUniform1i(glGetUniformLocation(ssao_shader_program, "uFrameIndex"), static_cast<int>(frame_index % 8));
-    // VXGI and hardware RT have no backend here, so they run the SSGI path rather
-    // than leaving the scene with no indirect light at all.
-    glUniform1i(glGetUniformLocation(ssao_shader_program, "uGIMode"),
-                gi_mode == GIMode::Off ? 0 : 1);
+    // 0 = off, 1 = screen-space, 2 = voxel cone traced. VXGI only reports 2 when
+    // the driver can actually run it and a volume has been built; otherwise it
+    // falls back to the screen-space path rather than leaving the scene with no
+    // indirect light. Hardware RT has no backend here at all and always falls back.
+    int gi_uniform = 1;
+    if (gi_mode == GIMode::Off) {
+        gi_uniform = 0;
+    } else if (gi_mode == GIMode::VXGI && vxgi_active() && voxel_volume_valid) {
+        gi_uniform = 2;
+    }
+    glUniform1i(glGetUniformLocation(ssao_shader_program, "uGIMode"), gi_uniform);
+
+    if (gi_uniform == 2) {
+        // Unit 3: the SSAO pass already binds 0-2, and stepping on one of those
+        // would cost the estimator its depth or normal input.
+        glActiveTexture(GL_TEXTURE3);
+        glBindTexture(GL_TEXTURE_3D, voxel_radiance_texture);
+        glUniform1i(glGetUniformLocation(ssao_shader_program, "uVoxelRadiance"), 3);
+        glActiveTexture(GL_TEXTURE0);
+
+        glUniform3f(glGetUniformLocation(ssao_shader_program, "uVoxelOrigin"),
+                    voxel_origin.x, voxel_origin.y, voxel_origin.z);
+        glUniform1f(glGetUniformLocation(ssao_shader_program, "uVoxelExtent"), voxel_world_extent);
+        glUniform1f(glGetUniformLocation(ssao_shader_program, "uVoxelSize"), voxel_size);
+        glUniform1f(glGetUniformLocation(ssao_shader_program, "uVXGIIntensity"), vxgi_intensity);
+        const Matrix4x4 inv_view = view_matrix.inverse();
+        glUniformMatrix4fv(glGetUniformLocation(ssao_shader_program, "uInvView"), 1, GL_FALSE,
+                           inv_view.m.data());
+    }
 
     glBindVertexArray(quad_vao);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -3983,12 +5035,32 @@ void Renderer::create_fbo(int width, int height) {
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT4, GL_TEXTURE_2D, gBakedGI, 0);
 
+    // Sixth target: material terms that need a colour rather than a scalar, and so
+    // could not be folded into the four channels of gPBR.
+    //
+    //   rgb - emission colour. Emissive was a scalar multiplying albedo, so a white
+    //         object could only ever glow white and a red one only red. A lamp with
+    //         a warm bulb in a grey housing was not expressible at all.
+    //   a   - specular tint. How much the dielectric specular highlight takes the
+    //         albedo's hue instead of staying white.
+    //
+    // RGBA8 rather than a float format: emission colour is a hue, and the intensity
+    // that scales it is already carried at full range in gPosition.w. Eight bits per
+    // channel here costs a quarter of the bandwidth of RGBA16F, which matters on the
+    // integrated parts this engine targets.
+    glGenTextures(1, &gMaterial);
+    glBindTexture(GL_TEXTURE_2D, gMaterial);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT5, GL_TEXTURE_2D, gMaterial, 0);
+
     // Tell OpenGL which color attachments we'll use (of this framebuffer) for rendering 
-    unsigned int attachments[5] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2,
-                                    GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4 };
+    unsigned int attachments[6] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1, GL_COLOR_ATTACHMENT2,
+                                    GL_COLOR_ATTACHMENT3, GL_COLOR_ATTACHMENT4, GL_COLOR_ATTACHMENT5 };
     void (*glDrawBuffers)(int, const unsigned int*) = (void (*)(int, const unsigned int*))SDL_GL_GetProcAddress("glDrawBuffers");
     if (glDrawBuffers) {
-        glDrawBuffers(5, attachments);
+        glDrawBuffers(6, attachments);
     }
 
     // Depth buffer
@@ -4122,6 +5194,7 @@ void Renderer::create_fbo(int width, int height) {
 
 void Renderer::destroy_fbo() {
     if (gBakedGI) { glDeleteTextures(1, &gBakedGI); gBakedGI = 0; }
+    if (gMaterial) { glDeleteTextures(1, &gMaterial); gMaterial = 0; }
     if (gBuffer_fbo) glDeleteFramebuffers(1, &gBuffer_fbo);
     if (gPosition) glDeleteTextures(1, &gPosition);
     if (gNormal) glDeleteTextures(1, &gNormal);
@@ -4177,7 +5250,7 @@ void Renderer::unbind_fbo() {
     glActiveTexture(GL_TEXTURE1); glBindTexture(GL_TEXTURE_2D, gNormal);
     glActiveTexture(GL_TEXTURE2); glBindTexture(GL_TEXTURE_2D, gAlbedoSpec);
     glActiveTexture(GL_TEXTURE3); glBindTexture(GL_TEXTURE_2D, gPBR);
-    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D, shadow_depth_map);
+    glActiveTexture(GL_TEXTURE4); glBindTexture(GL_TEXTURE_2D_ARRAY, shadow_depth_array);
     glActiveTexture(GL_TEXTURE5); glBindTexture(GL_TEXTURE_2D, env_map_texture);
     glActiveTexture(GL_TEXTURE6); glBindTexture(GL_TEXTURE_2D, env_irradiance_texture);
     glActiveTexture(GL_TEXTURE7); glBindTexture(GL_TEXTURE_2D, env_prefiltered_texture);
@@ -4188,6 +5261,7 @@ void Renderer::unbind_fbo() {
     // Unit 12: baked indirect light from the lightmap atlas or the probe grid,
     // whichever the geometry pass wrote for each pixel.
     glActiveTexture(GL_TEXTURE12); glBindTexture(GL_TEXTURE_2D, gBakedGI);
+    glActiveTexture(GL_TEXTURE13); glBindTexture(GL_TEXTURE_2D, gMaterial);
     // Back to unit 0: this pass reaches higher than any other, and a later one that
     // binds without selecting a unit first would otherwise land on 12.
     glActiveTexture(GL_TEXTURE0);
@@ -4206,9 +5280,27 @@ void Renderer::unbind_fbo() {
     glUniform3f(glGetUniformLocation(lighting_shader_program, "uCameraWorldPos"),
                 camera_position.x, camera_position.y, camera_position.z);
     
-    glUniformMatrix4fv(glGetUniformLocation(lighting_shader_program, "uLightSpaceMatrix"), 1, GL_FALSE, light_space_matrix.m.data());
-    glUniform1f(glGetUniformLocation(lighting_shader_program, "uShadowTexelWorldSize"), shadow_texel_world_size);
-    glUniform1f(glGetUniformLocation(lighting_shader_program, "uShadowDepthRange"), shadow_depth_range);
+    // Per-cascade state. Uploaded as whole arrays rather than one cascade at a
+    // time: the shader picks its cascade per fragment from view depth, so all four
+    // have to be resident for any of them to be selectable.
+    static_assert(sizeof(Matrix4x4) == 16 * sizeof(float),
+                  "Matrix4x4 must be tightly packed to upload as a cascade array");
+    glUniformMatrix4fv(glGetUniformLocation(lighting_shader_program, "uCascadeMatrices"),
+                       kShadowCascades, GL_FALSE, cascade_light_space[0].m.data());
+    glUniform1fv(glGetUniformLocation(lighting_shader_program, "uCascadeSplits"),
+                 kShadowCascades, cascade_split_depth);
+    glUniform1fv(glGetUniformLocation(lighting_shader_program, "uCascadeTexelWorld"),
+                 kShadowCascades, cascade_texel_world);
+    glUniform1fv(glGetUniformLocation(lighting_shader_program, "uCascadeDepthRange"),
+                 kShadowCascades, cascade_depth_range);
+    glUniform1f(glGetUniformLocation(lighting_shader_program, "uCascadeBlend"),
+                shadow_cascade_blend);
+    glUniform1f(glGetUniformLocation(lighting_shader_program, "uShadowDepthBiasTexels"),
+                shadow_depth_bias_texels);
+    glUniform1f(glGetUniformLocation(lighting_shader_program, "uShadowNormalBiasTexels"),
+                shadow_normal_bias_texels);
+    glUniform1i(glGetUniformLocation(lighting_shader_program, "uShadowCascadeDebug"),
+                debug_shadow_cascades ? 1 : 0);
     glUniform1f(glGetUniformLocation(lighting_shader_program, "uFogDensity"), fog_density);
     glUniform1f(glGetUniformLocation(lighting_shader_program, "uFogHeight"), fog_height);
     glUniform1f(glGetUniformLocation(lighting_shader_program, "uFogHeightFalloff"), fog_height_falloff);
@@ -4792,6 +5884,8 @@ void Renderer::clear_environment_map() {
 
 void Renderer::render_mesh(const StaticMeshComponent& mesh_component, const Transform& transform, const Vector3& color_override,
                             float metallic, float roughness, float clearcoat, float clearcoat_roughness, float sheen, float subsurface, float emissive,
+                            float normal_strength,
+                            const Vector3& emission_color, float specular_tint,
                             bool is_invisible, bool is_selected,
                             const std::vector<Matrix4x4>* bone_matrices,
                             const MeshResource* lod_mesh,
@@ -4931,6 +6025,30 @@ void Renderer::render_mesh(const StaticMeshComponent& mesh_component, const Tran
         if (diffuse_texture_location != -1) {
             glUniform1i(diffuse_texture_location, 0);
         }
+    }
+
+    // Normal map on unit 1. Bound only when it has finished streaming: a texture
+    // still uploading has no id, and sampling it would read whatever was last on
+    // the unit - which shows up as another object's albedo interpreted as normals.
+    auto normal_map = mesh_component.get_normal_texture();
+    const bool has_normal_map = normal_map && normal_map->get_state() == ResourceState::LoadedGPU;
+    if (has_normal_map_location != -1) {
+        glUniform1i(has_normal_map_location, has_normal_map ? 1 : 0);
+    }
+    if (has_normal_map) {
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, normal_map->get_texture_id());
+        if (normal_map_location != -1) glUniform1i(normal_map_location, 1);
+        glActiveTexture(GL_TEXTURE0);
+    }
+    if (normal_strength_location != -1) {
+        glUniform1f(normal_strength_location, normal_strength);
+    }
+    if (emission_color_location != -1) {
+        glUniform3f(emission_color_location, emission_color.x, emission_color.y, emission_color.z);
+    }
+    if (specular_tint_location != -1) {
+        glUniform1f(specular_tint_location, specular_tint);
     }
 
     if (wireframe_mode) {
@@ -5176,7 +6294,8 @@ void store_cached_program(const std::string& key, unsigned int program) {
 
 } // namespace
 
-unsigned int Renderer::compile_shaders(const std::string& vertex_src, const std::string& fragment_src) {
+unsigned int Renderer::compile_shaders(const std::string& vertex_src, const std::string& fragment_src,
+                                       const char* debug_name) {
     // Try the on-disk cache before invoking the driver's compiler.
     const std::string cache_key = shader_cache_key(vertex_src, fragment_src);
     if (unsigned int cached = load_cached_program(cache_key)) {
@@ -5193,8 +6312,8 @@ unsigned int Renderer::compile_shaders(const std::string& vertex_src, const std:
     glGetShaderiv(vertex, GL_COMPILE_STATUS, &success);
     if (!success) {
         glGetShaderInfoLog(vertex, 512, NULL, infoLog);
-        std::cerr << "Vertex shader compilation failed:\n" << infoLog << std::endl;
-        return false;
+        std::cerr << "[" << debug_name << "] Vertex shader compilation failed:\n" << infoLog << std::endl;
+        return 0;
     }
 
     const char* f_src = fragment_src.c_str();
@@ -5204,8 +6323,9 @@ unsigned int Renderer::compile_shaders(const std::string& vertex_src, const std:
     glGetShaderiv(fragment, GL_COMPILE_STATUS, &success);
     if (!success) {
         glGetShaderInfoLog(fragment, 512, NULL, infoLog);
-        std::cerr << "Fragment shader compilation failed:\n" << infoLog << std::endl;
-        return false;
+        std::cerr << "[" << debug_name << "] Fragment shader compilation failed:\n" << infoLog << std::endl;
+        glDeleteShader(vertex);
+        return 0;
     }
 
     unsigned int program = glCreateProgram();
@@ -5220,7 +6340,10 @@ unsigned int Renderer::compile_shaders(const std::string& vertex_src, const std:
     glGetProgramiv(program, GL_LINK_STATUS, &success);
     if (!success) {
         glGetProgramInfoLog(program, 512, NULL, infoLog);
-        std::cerr << "Shader program linking failed:\n" << infoLog << std::endl;
+        std::cerr << "[" << debug_name << "] Shader program linking failed:\n" << infoLog << std::endl;
+        glDeleteShader(vertex);
+        glDeleteShader(fragment);
+        glDeleteProgram(program);
         return 0;
     }
 

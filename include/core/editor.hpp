@@ -1,5 +1,8 @@
 #pragma once
 
+#include <set>
+#include <functional>
+
 #include "world/actor.hpp"
 #include "world/material.hpp"
 #include "core/command.hpp"
@@ -250,6 +253,76 @@ private:
     std::string editing_file_path = "";
     std::string editing_file_content = "";
     bool show_script_editor = false;
+    bool show_preferences = false;
+
+    // --- Outliner folders ---------------------------------------------------
+    // Every folder that exists, as a '/'-separated path. Held here rather than
+    // derived from the actors because an empty folder has nothing to derive it
+    // from, and a folder you just made is empty by definition.
+    std::set<std::string> outliner_folders;
+    // Folder a newly created one is nested under, and the buffer its name is typed
+    // into. Cleared when the popup closes.
+    std::string pending_folder_parent;
+    char new_folder_name[128] = "";
+    bool open_new_folder_popup = false;
+    // Folder being renamed, and the buffer for it.
+    std::string renaming_folder;
+    // Set by a context menu and applied after the tree walk finishes.
+    std::string pending_folder_delete;
+
+    // --- Duplicate / copy / paste -------------------------------------------
+    // Actors copied with Ctrl+C, held as full records rather than as pointers so
+    // pasting still works after the originals have been deleted.
+    std::vector<std::shared_ptr<Actor>> actor_clipboard;
+    // Renaming in the Outliner: which actor, and the buffer being typed into.
+    Actor* renaming_actor = nullptr;
+    char renaming_actor_buf[128] = "";
+    // Deferred so the actor list is not mutated while the tree walking it is live.
+    bool pending_duplicate = false;
+    bool pending_paste = false;
+    // Set when a rename starts, so the field takes focus on its first frame.
+    bool rename_focus_pending = false;
+
+    void duplicate_selected_actors(std::vector<std::shared_ptr<Actor>>& actors);
+    void copy_selected_actors();
+    void paste_actors(std::vector<std::shared_ptr<Actor>>& actors);
+
+public:
+    // Exposed for the self-test: the "Name", "Name (1)", "Name (2)" sequence is the
+    // whole of the duplicate/rename naming contract, and it is worth pinning.
+    static std::string next_available_name(const std::string& desired,
+                                           const std::function<bool(const std::string&)>& taken);
+private:
+    char renaming_folder_buf[128] = "";
+
+    // Recursively draws one folder and everything filed under it.
+    void draw_outliner_folder(const std::string& path, const std::string& display_name,
+                              std::vector<std::shared_ptr<Actor>>& actors);
+    // Draws one actor row, with its selection, context menu and drag source.
+    void draw_outliner_actor(Actor* actor);
+    // Accepts an actor dropped onto a folder row (or the root).
+    void accept_actor_drop(const std::string& target_folder);
+    // Renames a folder and re-files everything under it, including nested folders.
+    void rename_outliner_folder(const std::string& old_path, const std::string& new_name,
+                                std::vector<std::shared_ptr<Actor>>& actors);
+    // Removes a folder; its contents move up to its parent rather than being lost.
+    void delete_outliner_folder(const std::string& path, std::vector<std::shared_ptr<Actor>>& actors);
+    // True if `actor` passes the current outliner search filter.
+    bool actor_matches_filter(const Actor* actor) const;
+
+    // --- External code editor -----------------------------------------------
+    // Which editor script files open in. Index into ExternalEditor::registry(), or
+    // past its end for the custom command below. Persisted, because nobody wants to
+    // pick their editor again every time the engine starts.
+    int external_editor_index = 0;              // 0 = the built-in editor
+    char external_editor_command[512] = "";     // used when the index is "Custom"
+    // Opens `path` in whichever editor is configured, falling back to the built-in
+    // one if the external launch fails. `line` is 1-based; 0 means no particular line.
+    void open_script_file(const std::string& path, int line = 0);
+    void load_preferences();
+    void save_preferences() const;
+    void draw_preferences();
+    std::string preferences_test_message;
     bool show_visual_script_editor = false;
     bool show_material_editor = false;
     std::shared_ptr<Material> active_material = std::make_shared<Material>();

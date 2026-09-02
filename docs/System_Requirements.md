@@ -25,10 +25,14 @@ This is not an estimate. The engine is developed and tested on this machine:
 | Reflections Showcase interior | 12–20 |
 | Heavy SSR + SSGI + volumetrics | 1–5 |
 
-**Compute shaders are unavailable at this tier.** GPU cluster culling is skipped and
-the engine logs it at startup. Rendering is correct; only throughput is affected.
+**Compute shaders and fragment-shader image writes are unavailable at this tier.**
+GPU cluster culling is skipped, and VXGI cannot run — this GPU reports zero fragment
+image uniforms, so voxelisation is impossible and Global Illumination falls back to
+SSGI. Both are logged at startup. Rendering is correct; only throughput and the
+choice of GI technique are affected.
 
-Startup is around 4 seconds, almost entirely shader compilation.
+Startup is around 1 second. Linked programs are cached to disk, so only the first
+launch after a shader change pays for compilation.
 
 ---
 
@@ -76,8 +80,13 @@ context and rebuilt an identical one while writing `graphics_api: vulkan` into t
 config. An abstraction that has only ever had one implementation does not describe
 what a second would need.
 
-The GI mode enum does still reserve a hardware-RT tier, which is likewise
-unimplemented. **Treat it as a future tier, not a shipping feature.**
+VXGI is implemented and will run here, unlike on the minimum-target part: voxel cone
+tracing needs image load/store, which any GPU of this generation has in abundance.
+Grid resolution, extent and intensity are exposed in the editor.
+
+The GI mode enum does still reserve a hardware-RT tier, which is unimplemented and
+needs a Vulkan or DX12 backend that does not exist. **Treat it as a future tier, not
+a shipping feature.**
 
 ---
 
