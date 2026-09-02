@@ -50,30 +50,22 @@ To export your game as a standalone executable (without the Editor UI):
 
 ## License
 
-Lithium Engine is free software: you can redistribute it and/or modify it under
-the terms of the **GNU General Public License version 3** as published by the
-Free Software Foundation. See [LICENSE](LICENSE) for the full text.
+Lithium Engine is released under the **MIT License**. See [LICENSE](LICENSE) for
+the full text.
 
-This program is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
-PARTICULAR PURPOSE. See the GNU General Public License for more details.
+In short: use it for anything, including commercial and closed-source work. Keep
+the copyright notice somewhere in your distribution and you have met the whole
+obligation. There is no requirement to open-source your game, publish your
+changes to the engine, or pay anything.
 
-### What this means for a game you build with it
-
-The GPL is a *copyleft* licence, and that has a real consequence worth stating
-plainly rather than leaving for you to discover at release: a game that links
-the engine is a derivative work of it, so **shipping that game means offering
-its source under the GPL too**. Your own art, audio, levels and other assets are
-not affected - they are data the engine loads, not code linked into it.
-
-If you want to build something closed-source on this, the GPL is the wrong
-licence for you and you should not use this engine for it.
+The engine is provided as-is, with no warranty.
 
 ### Third-party components
 
-The engine builds against several libraries under their own, GPL-compatible
-terms. They are fetched at configure time or vendored under `thirdparty/`, and
-are **not** covered by this project's licence - each carries its own:
+The engine builds against several libraries under their own permissive terms.
+They are fetched at configure time or vendored under `thirdparty/`, and are
+**not** covered by this project's licence - each carries its own, and each asks
+you to preserve its notice when you distribute a build:
 
 | Component | License |
 | --- | --- |
@@ -87,6 +79,7 @@ are **not** covered by this project's licence - each carries its own:
 | Embree | Apache-2.0 |
 | stb_image, stb_image_write | MIT / public domain |
 
-All of the above are one-way compatible with GPLv3, which is what makes the
-combination distributable. Apache-2.0 in particular is compatible with GPLv3
-but *not* with GPLv2, so this project cannot be relicensed downward to v2.
+All of these are permissive, so a game shipped on Lithium can be closed-source.
+The only real obligation is attribution: bundle the notices (a `THIRD-PARTY.txt`
+in your game folder is the usual way). Embree's Apache-2.0 is the strictest of
+them and still only asks for the notice and a statement of changes.
