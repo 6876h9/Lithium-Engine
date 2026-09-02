@@ -50,13 +50,29 @@ To export your game as a standalone executable (without the Editor UI):
 
 ## License
 
-Lithium Engine is released under the **MIT License**. See [LICENSE](LICENSE) for
-the full text.
+Lithium Engine is released under the **Mozilla Public License 2.0**. See
+[LICENSE](LICENSE) for the full text.
 
-In short: use it for anything, including commercial and closed-source work. Keep
-the copyright notice somewhere in your distribution and you have met the whole
-obligation. There is no requirement to open-source your game, publish your
-changes to the engine, or pay anything.
+MPL-2.0 is a middle ground between MIT and the GPL, chosen deliberately. It is
+*file-level* copyleft:
+
+- **Your game stays yours.** Building a game on Lithium - including a commercial,
+  closed-source one - carries no obligation to publish your own code. Your game
+  logic, art, audio and levels are yours, under whatever terms you like.
+- **Improvements to the engine come back.** If you modify a file that is part of
+  Lithium and then distribute the result, that file has to stay under MPL-2.0 and
+  its source has to be available. You cannot take the engine, improve it, and
+  ship the improved engine as a closed product.
+
+The line is drawn per *file*, not by linking. A new file you write is yours even
+if it sits in this tree and calls straight into the engine; a Lithium file you
+edited is not. That is what makes MPL workable here where the LGPL would not be:
+`Lithium_Game` is compiled from the same sources as the editor, so a shipped game
+is a copy of the engine rather than a program linking a library, and the LGPL's
+relinking requirement has no sensible meaning in that shape.
+
+In practice: **make whatever you want with it, and if you fix a bug in the engine
+itself, share the fix.**
 
 The engine is provided as-is, with no warranty.
 
@@ -79,7 +95,6 @@ you to preserve its notice when you distribute a build:
 | Embree | Apache-2.0 |
 | stb_image, stb_image_write | MIT / public domain |
 
-All of these are permissive, so a game shipped on Lithium can be closed-source.
-The only real obligation is attribution: bundle the notices (a `THIRD-PARTY.txt`
-in your game folder is the usual way). Embree's Apache-2.0 is the strictest of
-them and still only asks for the notice and a statement of changes.
+All of these are permissive and combine freely with MPL-2.0. The obligation they
+carry is attribution: bundle their notices with a shipped game, which a
+`THIRD-PARTY.txt` in the game folder satisfies.
