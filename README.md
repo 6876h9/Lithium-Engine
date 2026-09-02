@@ -47,3 +47,46 @@ To export your game as a standalone executable (without the Editor UI):
 2. Go to **File > Export Project...** in the top menu bar.
 3. Select an empty folder where you want your game to be exported.
 4. The engine will compile a standalone executable and package your assets into that directory.
+
+## License
+
+Lithium Engine is free software: you can redistribute it and/or modify it under
+the terms of the **GNU General Public License version 3** as published by the
+Free Software Foundation. See [LICENSE](LICENSE) for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+### What this means for a game you build with it
+
+The GPL is a *copyleft* licence, and that has a real consequence worth stating
+plainly rather than leaving for you to discover at release: a game that links
+the engine is a derivative work of it, so **shipping that game means offering
+its source under the GPL too**. Your own art, audio, levels and other assets are
+not affected - they are data the engine loads, not code linked into it.
+
+If you want to build something closed-source on this, the GPL is the wrong
+licence for you and you should not use this engine for it.
+
+### Third-party components
+
+The engine builds against several libraries under their own, GPL-compatible
+terms. They are fetched at configure time or vendored under `thirdparty/`, and
+are **not** covered by this project's licence - each carries its own:
+
+| Component | License |
+| --- | --- |
+| Dear ImGui, imnodes | MIT |
+| Jolt Physics | MIT |
+| Lua | MIT |
+| miniaudio | MIT / public domain |
+| ENet | MIT |
+| assimp | BSD-3-Clause |
+| SDL2 | zlib |
+| Embree | Apache-2.0 |
+| stb_image, stb_image_write | MIT / public domain |
+
+All of the above are one-way compatible with GPLv3, which is what makes the
+combination distributable. Apache-2.0 in particular is compatible with GPLv3
+but *not* with GPLv2, so this project cannot be relicensed downward to v2.
