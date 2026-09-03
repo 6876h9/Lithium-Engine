@@ -615,6 +615,17 @@ public:
     // True if a caster with this camera-relative bounding sphere can put anything
     // into the cascade currently being drawn.
     bool cascade_accepts_caster(const Vector3& center_relative, float radius) const;
+    // Cascade fit results, for the self-test. The fit is pure CPU maths against the
+    // current view and projection, so it can be checked without drawing anything.
+    float cascade_split(int index) const {
+        return (index >= 0 && index < kShadowCascades) ? cascade_split_depth[index] : -1.0f;
+    }
+    float cascade_fit_radius(int index) const {
+        return (index >= 0 && index < kShadowCascades) ? cascade_radius[index] : -1.0f;
+    }
+    const Matrix4x4& cascade_matrix(int index) const {
+        return cascade_light_space[index < 0 ? 0 : (index >= kShadowCascades ? kShadowCascades - 1 : index)];
+    }
     // Binds cascade `cascade` as the depth target and uploads its light-space
     // matrix. The caller draws every caster once per cascade; see Engine::render.
     void begin_shadow_pass(int cascade = 0);

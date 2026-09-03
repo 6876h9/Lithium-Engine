@@ -21,6 +21,7 @@
 #include "physics/physics_engine.hpp"
 #include "navigation/navmesh.hpp"
 #include "renderer/lightmapper.hpp"
+#include "renderer/gl_loader.hpp"
 #include "scripting/cminus_interpreter.hpp"
 
 #include <cmath>
@@ -1136,6 +1137,87 @@ int run_selftest(Engine& engine) {
         };
         check(Editor::next_available_name("Cube(1)", nospace_taken) == "Cube(1) (1)",
               "a counter without the space is not one");
+    }
+
+    // --- Shadow cascades -----------------------------------------------------
+    //
+    // The cascade fit is pure maths against the current view and projection, so it
+    // can be checked without drawing. A bad fit does not error - it silently stops
+    // selecting a cascade, and every shadow in the scene disappears.
+    {
+        section("Shadow cascades");
+
+        if (g_engine) {
+            Renderer& r = g_engine->get_renderer();
+            const float aspect = 16.0f / 9.0f;
+            r.set_view_matrix(Matrix4x4::identity());
+            r.set_projection_matrix(Matrix4x4::perspective(45.0f, aspect, 0.1f, 1000.0f));
+            r.shadow_distance = 250.0f;
+            r.begin_shadow_pass(0);   // refits every cascade
+            r.end_shadow_pass();
+
+            const int count = Renderer::shadow_cascade_count();
+            bool splits_increase = true;
+            bool radii_positive = true;
+            bool matrices_finite = true;
+            float previous = 0.0f;
+            for (int i = 0; i < count; ++i) {
+                const float split = r.cascade_split(i);
+                if (!(split > previous)) splits_increase = false;
+                previous = split;
+                if (!(r.cascade_fit_radius(i) > 0.0f)) radii_positive = false;
+                for (float v : r.cascade_matrix(i).m) {
+                    if (!std::isfinite(v)) matrices_finite = false;
+                }
+            }
+            check(splits_increase, "cascade splits increase with distance");
+            check(radii_positive, "every cascade has a positive fit radius");
+            check(matrices_finite, "every cascade matrix is finite");
+
+            {
+                std::ostringstream detail;
+                detail << "the last cascade reaches the shadow distance ("
+                       << std::fixed << std::setprecision(1) << r.cascade_split(count - 1)
+                       << " of 250)";
+                check(r.cascade_split(count - 1) > 200.0f, detail.str());
+            }
+
+            // The point of the fit: a caster in front of the camera has to land in
+            // some cascade. If none accepts it, nothing is ever drawn into the
+            // shadow map and the scene renders unshadowed.
+            bool accepted_somewhere = false;
+            for (int i = 0; i < count; ++i) {
+                r.begin_shadow_pass(i);
+                if (r.cascade_accepts_caster(Vector3{ 0.0f, 0.0f, -10.0f }, 1.0f)) {
+                    accepted_somewhere = true;
+                }
+                r.end_shadow_pass();
+            }
+            check(accepted_somewhere, "a caster 10 units in front of the camera lands in a cascade");
+
+            bool near_accepted = false;
+            for (int i = 0; i < count; ++i) {
+                r.begin_shadow_pass(i);
+                if (r.cascade_accepts_caster(Vector3{ 0.0f, 0.0f, -2.0f }, 0.5f)) near_accepted = true;
+                r.end_shadow_pass();
+            }
+            check(near_accepted, "and so does one 2 units away");
+
+            // The G-buffer grew to six targets when emission colour and specular
+            // tint were added. If this GPU cannot bind that many, every draw after
+            // the fourth or fifth attachment is silently dropped and the deferred
+            // pass reads uninitialised memory - which looks like broken lighting,
+            // not like an error.
+            GLint max_draw_buffers = 0, max_attachments = 0;
+            glGetIntegerv(GL_MAX_DRAW_BUFFERS, &max_draw_buffers);
+            glGetIntegerv(GL_MAX_COLOR_ATTACHMENTS, &max_attachments);
+            {
+                std::ostringstream detail;
+                detail << "the GPU allows " << max_draw_buffers << " draw buffers and "
+                       << max_attachments << " colour attachments; the G-buffer needs 6";
+                check(max_draw_buffers >= 6 && max_attachments >= 6, detail.str());
+            }
+        }
     }
 
     // --- Result ------------------------------------------------------------
