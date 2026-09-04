@@ -346,6 +346,8 @@ private:
     std::vector<float> denoise_albedo_;
     std::vector<float> denoise_normal_;
     std::vector<float> denoise_output_;
+    // GPU backend readback of the accumulation texture: rgb = sum, a = count.
+    std::vector<float> denoise_readback_;
     unsigned int denoised_texture_ = 0;
     bool denoised_valid_ = false;
     int  denoised_at_samples_ = -1;

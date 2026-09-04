@@ -2614,23 +2614,54 @@ bool TeslaRenderer::run_denoiser() {
     if (denoised_at_samples_ == samples_done_) return true; // already current
 
     const size_t pixels = static_cast<size_t>(width_) * height_;
-    if (accum_.size() != pixels || accum_counts_.size() != pixels) return false;
 
     denoise_color_.resize(pixels * 3);
     denoise_albedo_.resize(pixels * 3);
     denoise_normal_.resize(pixels * 3);
     denoise_output_.resize(pixels * 3);
 
-    const bool have_aux = (aov_albedo_.size() == pixels && aov_normal_.size() == pixels);
+    // Which backend owns the estimate decides where it is read from. The CPU
+    // accumulation buffers are allocated for both backends but only the CPU path
+    // ever writes them, so reading them on the GPU backend yields an all-zero
+    // image - which the filter happily denoises into a black frame and uploads
+    // over the viewport. The backend has to be checked, not the buffer's size.
+    const bool gpu_backend = settings_.use_gpu && gpu_ready_;
+
+    // Auxiliary planes come from the CPU tracer's first hit. The GPU backend does
+    // not produce them, so it denoises on colour alone - still worth roughly a 5x
+    // noise reduction, against 6x with them.
+    const bool have_aux = !gpu_backend &&
+                          aov_albedo_.size() == pixels && aov_normal_.size() == pixels;
+
+    if (gpu_backend) {
+        if (accum_texture_ == 0) return false;
+        // rgb = summed radiance, a = sample count, exactly as the present pass reads it.
+        denoise_readback_.resize(pixels * 4);
+        glBindTexture(GL_TEXTURE_2D, accum_texture_);
+        glGetTexImage(GL_TEXTURE_2D, 0, GL_RGBA, GL_FLOAT, denoise_readback_.data());
+        glBindTexture(GL_TEXTURE_2D, 0);
+    } else if (accum_.size() != pixels || accum_counts_.size() != pixels) {
+        return false;
+    }
+
+    // Nothing has actually been traced if no pixel carries a sample. Denoising that
+    // produces a black image, and uploading it would replace a correct viewport
+    // with an empty one - the failure this guard exists to prevent.
+    double total_samples = 0.0;
 
     for (size_t i = 0; i < pixels; ++i) {
-        const float count = accum_counts_[i];
+        const float count = gpu_backend ? denoise_readback_[i * 4 + 3] : accum_counts_[i];
+        total_samples += count;
         const float inv = (count > 0.0f) ? 1.0f / count : 0.0f;
 
         // The filter is configured for HDR input, so the estimate goes in at its
         // true scale rather than tonemapped - tonemapping first would ask it to
         // remove noise from a signal whose statistics have already been distorted.
-        Vector3 c = accum_[i] * inv;
+        const Vector3 sum = gpu_backend
+            ? Vector3{ denoise_readback_[i * 4 + 0], denoise_readback_[i * 4 + 1],
+                       denoise_readback_[i * 4 + 2] }
+            : accum_[i];
+        Vector3 c = sum * inv;
         // A non-finite pixel would propagate across the whole image through the
         // filter's support, so it is clamped here rather than trusted.
         denoise_color_[i * 3 + 0] = std::isfinite(c.x) ? c.x : 0.0f;
@@ -2638,16 +2669,17 @@ bool TeslaRenderer::run_denoiser() {
         denoise_color_[i * 3 + 2] = std::isfinite(c.z) ? c.z : 0.0f;
 
         if (have_aux) {
+            const float aux_inv = inv;
             // Albedo is expected in [0,1]; it is a reflectance, and a value outside
             // that range is a material bug the filter should not have to absorb.
-            Vector3 a = aov_albedo_[i] * inv;
+            Vector3 a = aov_albedo_[i] * aux_inv;
             denoise_albedo_[i * 3 + 0] = std::clamp(a.x, 0.0f, 1.0f);
             denoise_albedo_[i * 3 + 1] = std::clamp(a.y, 0.0f, 1.0f);
             denoise_albedo_[i * 3 + 2] = std::clamp(a.z, 0.0f, 1.0f);
 
             // Averaging normals over samples denormalises them at silhouettes,
             // which is exactly where it matters that they are unit length.
-            Vector3 n = aov_normal_[i] * inv;
+            Vector3 n = aov_normal_[i] * aux_inv;
             const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
             if (len > 1e-6f) n = n / len; else n = Vector3{ 0.0f, 0.0f, 0.0f };
             denoise_normal_[i * 3 + 0] = n.x;
@@ -2655,6 +2687,8 @@ bool TeslaRenderer::run_denoiser() {
             denoise_normal_[i * 3 + 2] = n.z;
         }
     }
+
+    if (total_samples <= 0.0) return false;   // nothing traced yet
 
     if (!oidn_device_ok()) return false;
 

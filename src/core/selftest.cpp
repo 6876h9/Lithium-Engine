@@ -1239,6 +1239,20 @@ int run_selftest(Engine& engine) {
                 check(!r.tesla.run_denoiser(), "denoising an empty accumulation is refused");
                 check(r.tesla.display_texture() == r.tesla.accumulation_texture(),
                       "and the raw accumulation stays on screen");
+
+                // The regression this exists for: the CPU accumulation buffers are
+                // sized for both backends but only the CPU path writes them. Reading
+                // them while the GPU backend owns the estimate yields an all-zero
+                // image, which the filter denoises into a black frame and uploads
+                // over a perfectly good viewport. Sizing alone is not a safe guard.
+                TeslaSettings& ts = r.tesla.settings();
+                const bool was_gpu = ts.use_gpu;
+                ts.use_gpu = true;
+                check(!r.tesla.run_denoiser(),
+                      "denoising is refused on the GPU backend with nothing traced");
+                check(r.tesla.display_texture() == r.tesla.accumulation_texture(),
+                      "so a black frame is never presented in place of the render");
+                ts.use_gpu = was_gpu;
             }
         }
     }
