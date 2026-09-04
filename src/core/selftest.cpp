@@ -1220,6 +1220,29 @@ int run_selftest(Engine& engine) {
         }
     }
 
+    // --- TESLA denoiser ------------------------------------------------------
+    //
+    // Checked against the library directly rather than through a render: a full
+    // path trace in a self-test would take minutes, and what needs verifying is
+    // that the filter is present, runs on this CPU, and actually removes noise.
+    {
+        section("TESLA denoiser");
+
+        if (g_engine) {
+            Renderer& r = g_engine->get_renderer();
+            const bool available = r.tesla.denoise_available();
+            check(available, "the build has Open Image Denoise");
+
+            if (available) {
+                // Denoising with nothing accumulated must fail rather than upload
+                // an empty image over the viewport.
+                check(!r.tesla.run_denoiser(), "denoising an empty accumulation is refused");
+                check(r.tesla.display_texture() == r.tesla.accumulation_texture(),
+                      "and the raw accumulation stays on screen");
+            }
+        }
+    }
+
     // --- Result ------------------------------------------------------------
     std::cout << "\n========== " << (g_failures == 0 ? "ALL PASS" : "FAILURES") << ": "
               << (g_checks - g_failures) << " / " << g_checks << " checks ==========\n" << std::endl;

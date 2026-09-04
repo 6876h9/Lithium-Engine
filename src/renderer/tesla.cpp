@@ -876,6 +876,11 @@ void TeslaRenderer::resize(int width, int height) {
 
     accum_.assign(static_cast<size_t>(width_) * height_, Vector3{ 0.0f, 0.0f, 0.0f });
     accum_counts_.assign(static_cast<size_t>(width_) * height_, 0.0f);
+    aov_albedo_.assign(static_cast<size_t>(width_) * height_, Vector3{ 0.0f, 0.0f, 0.0f });
+    aov_normal_.assign(static_cast<size_t>(width_) * height_, Vector3{ 0.0f, 0.0f, 0.0f });
+    // Any denoised image describes the accumulation that was just thrown away.
+    denoised_valid_ = false;
+    denoised_at_samples_ = -1;
     upload_scratch_.assign(static_cast<size_t>(width_) * height_ * 4, 0.0f);
 
     constexpr int kTile = 16;
@@ -1012,7 +1017,11 @@ void TeslaRenderer::render_tile(int tile_index, int sample_index) {
             };
             dir = dir.normalized();
 
-            Vector3 radiance = trace(camera_position_, dir, rng);
+            // A ray that hits nothing leaves these at the sky's own colour and a
+            // zero normal, which is what OIDN expects for background pixels.
+            Vector3 hit_albedo{ 0.0f, 0.0f, 0.0f };
+            Vector3 hit_normal{ 0.0f, 0.0f, 0.0f };
+            Vector3 radiance = trace(camera_position_, dir, rng, &hit_albedo, &hit_normal);
 
             // NaN/Inf guard. A non-finite sample would poison the running mean for
             // good, and dropping it is the only way to keep the average defined.
@@ -1020,11 +1029,20 @@ void TeslaRenderer::render_tile(int tile_index, int sample_index) {
                 accum_[pixel] += radiance;
             }
             accum_counts_[pixel] += 1.0f;
+
+            // The auxiliary planes are averaged over the same samples as radiance,
+            // so anti-aliasing at a silhouette blends them the way it blends colour
+            // and the denoiser is not handed a hard edge the image does not have.
+            if (!aov_albedo_.empty()) {
+                aov_albedo_[pixel] += hit_albedo;
+                aov_normal_[pixel] += hit_normal;
+            }
         }
     }
 }
 
-Vector3 TeslaRenderer::trace(Vector3 origin, Vector3 dir, uint64_t& rng) const {
+Vector3 TeslaRenderer::trace(Vector3 origin, Vector3 dir, uint64_t& rng,
+                             Vector3* out_albedo, Vector3* out_normal) const {
     Vector3 radiance{ 0.0f, 0.0f, 0.0f };
     Vector3 throughput{ 1.0f, 1.0f, 1.0f };
 
@@ -1172,6 +1190,14 @@ Vector3 TeslaRenderer::trace(Vector3 origin, Vector3 dir, uint64_t& rng) const {
             shading_normal = neg(shading_normal);
         }
         if (Vector3::dot(shading_normal, geo_normal) < 0.0f) shading_normal = geo_normal;
+
+        // First hit only: this is the surface the pixel actually shows, and the
+        // denoiser needs its albedo and normal noise-free to keep edges that the
+        // radiance estimate is too noisy to resolve on its own.
+        if (depth == 0) {
+            if (out_albedo) *out_albedo = surface_albedo;
+            if (out_normal) *out_normal = shading_normal;
+        }
 
         const Vector3 hit_point = origin + dir * hit.t;
         const Vector3 wo_world = neg(dir);
@@ -2495,4 +2521,188 @@ void TeslaRenderer::step_gpu() {
     glEnable(GL_DEPTH_TEST);
 
     ++samples_done_;
+}
+
+// ===========================================================================
+//  Denoising - Intel Open Image Denoise
+//
+//  The path tracer is unbiased, so its error appears as noise rather than as a
+//  wrong image, and halving that noise costs four times the samples. A denoiser
+//  buys back most of it for a fixed cost, which is the difference between a
+//  preview usable after a second and one usable after a minute.
+//
+//  It runs as a post-process. The accumulation buffers are never modified, so
+//  sampling continues from exactly where it was and the underlying estimate
+//  stays unbiased - the bias lives only in the image being displayed.
+//
+//  The albedo and normal planes matter more than they look. Without them the
+//  filter cannot tell a noisy shadow edge from a texture edge and smears both;
+//  with them it keeps detail the radiance estimate is far too noisy to resolve.
+// ===========================================================================
+
+#if LITHIUM_HAS_OIDN
+#include <OpenImageDenoise/oidn.hpp>
+#endif
+
+namespace {
+
+#if LITHIUM_HAS_OIDN
+// One device for the process. Creating it is expensive - it probes the CPU and
+// loads the weights - and it is entirely reusable between filters and frames.
+oidn::DeviceRef& oidn_device() {
+    static oidn::DeviceRef device = [] {
+        oidn::DeviceRef d = oidn::newDevice(oidn::DeviceType::CPU);
+        d.commit();
+        return d;
+    }();
+    return device;
+}
+
+bool oidn_device_ok() {
+    const char* message = nullptr;
+    // Reading the error also clears it, so a failure earlier in the session does
+    // not make every later call look broken.
+    return oidn_device().getError(message) == oidn::Error::None;
+}
+#endif
+
+} // namespace
+
+bool TeslaRenderer::denoise_available() const {
+#if LITHIUM_HAS_OIDN
+    return true;
+#else
+    return false;
+#endif
+}
+
+void TeslaRenderer::ensure_denoise_target() {
+    if (width_ <= 0 || height_ <= 0) return;
+    if (denoised_texture_ == 0) glGenTextures(1, &denoised_texture_);
+
+    glBindTexture(GL_TEXTURE_2D, denoised_texture_);
+    // RGBA32F and NEAREST, matching the accumulation target: the present pass
+    // divides rgb by a, so the denoised image is written with a = 1 and flows
+    // through the same shader untouched.
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width_, height_, 0, GL_RGBA, GL_FLOAT, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glBindTexture(GL_TEXTURE_2D, 0);
+}
+
+void TeslaRenderer::release_denoiser() {
+    if (denoised_texture_ != 0) {
+        glDeleteTextures(1, &denoised_texture_);
+        denoised_texture_ = 0;
+    }
+    denoised_valid_ = false;
+    denoised_at_samples_ = -1;
+}
+
+unsigned int TeslaRenderer::display_texture() const {
+    return (denoised_valid_ && denoised_texture_ != 0) ? denoised_texture_ : accum_texture_;
+}
+
+bool TeslaRenderer::run_denoiser() {
+#if !LITHIUM_HAS_OIDN
+    return false;
+#else
+    if (width_ <= 0 || height_ <= 0) return false;
+    if (samples_done_ <= 0) return false;                 // nothing to filter yet
+    if (denoised_at_samples_ == samples_done_) return true; // already current
+
+    const size_t pixels = static_cast<size_t>(width_) * height_;
+    if (accum_.size() != pixels || accum_counts_.size() != pixels) return false;
+
+    denoise_color_.resize(pixels * 3);
+    denoise_albedo_.resize(pixels * 3);
+    denoise_normal_.resize(pixels * 3);
+    denoise_output_.resize(pixels * 3);
+
+    const bool have_aux = (aov_albedo_.size() == pixels && aov_normal_.size() == pixels);
+
+    for (size_t i = 0; i < pixels; ++i) {
+        const float count = accum_counts_[i];
+        const float inv = (count > 0.0f) ? 1.0f / count : 0.0f;
+
+        // The filter is configured for HDR input, so the estimate goes in at its
+        // true scale rather than tonemapped - tonemapping first would ask it to
+        // remove noise from a signal whose statistics have already been distorted.
+        Vector3 c = accum_[i] * inv;
+        // A non-finite pixel would propagate across the whole image through the
+        // filter's support, so it is clamped here rather than trusted.
+        denoise_color_[i * 3 + 0] = std::isfinite(c.x) ? c.x : 0.0f;
+        denoise_color_[i * 3 + 1] = std::isfinite(c.y) ? c.y : 0.0f;
+        denoise_color_[i * 3 + 2] = std::isfinite(c.z) ? c.z : 0.0f;
+
+        if (have_aux) {
+            // Albedo is expected in [0,1]; it is a reflectance, and a value outside
+            // that range is a material bug the filter should not have to absorb.
+            Vector3 a = aov_albedo_[i] * inv;
+            denoise_albedo_[i * 3 + 0] = std::clamp(a.x, 0.0f, 1.0f);
+            denoise_albedo_[i * 3 + 1] = std::clamp(a.y, 0.0f, 1.0f);
+            denoise_albedo_[i * 3 + 2] = std::clamp(a.z, 0.0f, 1.0f);
+
+            // Averaging normals over samples denormalises them at silhouettes,
+            // which is exactly where it matters that they are unit length.
+            Vector3 n = aov_normal_[i] * inv;
+            const float len = std::sqrt(n.x * n.x + n.y * n.y + n.z * n.z);
+            if (len > 1e-6f) n = n / len; else n = Vector3{ 0.0f, 0.0f, 0.0f };
+            denoise_normal_[i * 3 + 0] = n.x;
+            denoise_normal_[i * 3 + 1] = n.y;
+            denoise_normal_[i * 3 + 2] = n.z;
+        }
+    }
+
+    if (!oidn_device_ok()) return false;
+
+    oidn::FilterRef filter = oidn_device().newFilter("RT");
+    filter.setImage("color", denoise_color_.data(), oidn::Format::Float3, width_, height_);
+    if (have_aux) {
+        filter.setImage("albedo", denoise_albedo_.data(), oidn::Format::Float3, width_, height_);
+        filter.setImage("normal", denoise_normal_.data(), oidn::Format::Float3, width_, height_);
+        // The auxiliary planes are themselves averaged over few samples early on,
+        // so they carry noise too; this filters them before use.
+        filter.set("cleanAux", false);
+    }
+    filter.setImage("output", denoise_output_.data(), oidn::Format::Float3, width_, height_);
+    filter.set("hdr", true);
+    filter.commit();
+
+    const char* message = nullptr;
+    if (oidn_device().getError(message) != oidn::Error::None) {
+        std::cerr << "[TESLA] Denoiser setup failed: " << (message ? message : "unknown")
+                  << std::endl;
+        return false;
+    }
+
+    filter.execute();
+    if (oidn_device().getError(message) != oidn::Error::None) {
+        std::cerr << "[TESLA] Denoise failed: " << (message ? message : "unknown") << std::endl;
+        return false;
+    }
+
+    ensure_denoise_target();
+    if (denoised_texture_ == 0) return false;
+
+    // Uploaded with a = 1 so the present shader's divide is a no-op and the same
+    // exposure and tonemap apply to denoised and raw output alike.
+    std::vector<float>& rgba = upload_scratch_;
+    if (rgba.size() < pixels * 4) rgba.resize(pixels * 4);
+    for (size_t i = 0; i < pixels; ++i) {
+        rgba[i * 4 + 0] = denoise_output_[i * 3 + 0];
+        rgba[i * 4 + 1] = denoise_output_[i * 3 + 1];
+        rgba[i * 4 + 2] = denoise_output_[i * 3 + 2];
+        rgba[i * 4 + 3] = 1.0f;
+    }
+    glBindTexture(GL_TEXTURE_2D, denoised_texture_);
+    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, width_, height_, GL_RGBA, GL_FLOAT, rgba.data());
+    glBindTexture(GL_TEXTURE_2D, 0);
+
+    denoised_valid_ = true;
+    denoised_at_samples_ = samples_done_;
+    return true;
+#endif
 }

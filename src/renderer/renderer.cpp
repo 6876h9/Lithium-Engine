@@ -6457,6 +6457,19 @@ void Renderer::present_tesla() {
     if (tesla_present_program == 0 || tesla_present_fbo == 0) return;
     if (tesla.accumulation_texture() == 0) return;
 
+    // Denoise before presenting, not after: the filter runs on the raw estimate,
+    // and the present pass applies exposure and tonemapping to whatever it is
+    // handed. Denoising a tonemapped image would ask the filter to clean up a
+    // signal whose noise statistics have already been distorted.
+    //
+    // Only when the render finishes, unless the user asked for it continuously -
+    // denoising every preview step costs more time than the samples it saves.
+    if (tesla.settings().denoise && tesla.denoise_available()) {
+        if (tesla.is_complete() || tesla.settings().denoise_while_rendering) {
+            tesla.run_denoiser();
+        }
+    }
+
     glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
     glDisable(GL_DEPTH_TEST);
     glDisable(GL_BLEND);
@@ -6470,7 +6483,7 @@ void Renderer::present_tesla() {
         glViewport(0, 0, 64, 64);
         glUseProgram(tesla_lum_program);
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, tesla.accumulation_texture());
+        glBindTexture(GL_TEXTURE_2D, tesla.display_texture());
         glUniform1i(glGetUniformLocation(tesla_lum_program, "uAccum"), 0);
         glDrawArrays(GL_TRIANGLES, 0, 6);
 
@@ -6483,7 +6496,7 @@ void Renderer::present_tesla() {
 
     glUseProgram(tesla_present_program);
     glActiveTexture(GL_TEXTURE0);
-    glBindTexture(GL_TEXTURE_2D, tesla.accumulation_texture());
+    glBindTexture(GL_TEXTURE_2D, tesla.display_texture());
     glUniform1i(glGetUniformLocation(tesla_present_program, "uAccum"), 0);
 
     glActiveTexture(GL_TEXTURE1);

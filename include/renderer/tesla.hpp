@@ -161,6 +161,19 @@ struct TeslaSettings {
     // any non-zero value is a bias source; exposed because fireflies are sometimes
     // worth the trade.
     float firefly_clamp = 0.0f;
+
+    // --- Denoising -----------------------------------------------------------
+    // Runs Intel Open Image Denoise over the accumulated estimate. The estimator
+    // itself stays unbiased; this is a post-process on the image it produced, and
+    // the raw accumulation is kept intact so more samples can still be added.
+    //
+    // Off while accumulating and on at completion is the useful default: denoising
+    // every step costs more than the samples it saves, but a finished render
+    // essentially always wants it.
+    bool denoise = true;
+    // Denoise each time the preview updates, not only when the render completes.
+    // Expensive, and worth it when someone is dialling in lighting interactively.
+    bool denoise_while_rendering = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -209,6 +222,20 @@ public:
     int  width() const  { return width_; }
     int  height() const { return height_; }
 
+    // --- Denoising -----------------------------------------------------------
+    // True when the build has Open Image Denoise and its device came up. False on a
+    // build without the SDK, so callers can grey the option out rather than offer
+    // something that cannot run.
+    bool denoise_available() const;
+    // Runs the filter over the current estimate. Returns false when unavailable, or
+    // when nothing has been accumulated yet. The accumulation is not modified.
+    bool run_denoiser();
+    // The texture to present: the denoised result when one is current, otherwise the
+    // raw accumulation. Callers should prefer this over accumulation_texture().
+    unsigned int display_texture() const;
+    // Whether the denoised texture reflects the current sample count.
+    bool denoised_is_current() const { return denoised_valid_; }
+
     // RGBA32F: rgb = summed radiance, a = sample count. Divide to get the estimate.
     unsigned int accumulation_texture() const { return accum_texture_; }
 
@@ -240,7 +267,11 @@ private:
     // --- CPU integrator ---
     void step_cpu();
     void render_tile(int tile_index, int sample_index);
-    Vector3 trace(Vector3 origin, Vector3 dir, uint64_t& rng) const;
+    // out_albedo / out_normal receive the first hit's surface albedo and shading
+    // normal, for the denoiser. Null when the caller does not want them, which is
+    // every path except primary camera rays.
+    Vector3 trace(Vector3 origin, Vector3 dir, uint64_t& rng,
+                  Vector3* out_albedo = nullptr, Vector3* out_normal = nullptr) const;
 
     // --- GPU integrator ---
     void step_gpu();
@@ -303,6 +334,23 @@ private:
 
     unsigned int accum_fbo_     = 0;
     unsigned int accum_texture_ = 0;
+
+    // --- denoiser ---
+    // First-hit albedo and shading normal, averaged the same way radiance is. OIDN
+    // uses them to tell a noisy shadow from a genuine texture edge, and feeding
+    // them is the difference between preserved detail and a smeared image.
+    std::vector<Vector3> aov_albedo_;
+    std::vector<Vector3> aov_normal_;
+    // Interleaved float3 planes handed to the filter, plus its output.
+    std::vector<float> denoise_color_;
+    std::vector<float> denoise_albedo_;
+    std::vector<float> denoise_normal_;
+    std::vector<float> denoise_output_;
+    unsigned int denoised_texture_ = 0;
+    bool denoised_valid_ = false;
+    int  denoised_at_samples_ = -1;
+    void ensure_denoise_target();
+    void release_denoiser();
 
     unsigned int trace_program_ = 0;
 

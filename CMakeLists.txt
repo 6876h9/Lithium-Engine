@@ -49,6 +49,37 @@ else()
     set(EMBREE_LINK_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/embree)
 endif()
 
+# --- Intel Open Image Denoise (optional) -------------------------------------
+#
+# TESLA's estimator is unbiased, which means its error shows up as noise rather
+# than as a wrong image, and the only way to halve that noise is four times the
+# samples. A denoiser trades a little bias for an enormous amount of time, so it
+# is the difference between a preview that is usable after a second and one that
+# is usable after a minute.
+#
+# Optional on purpose: the SDK is a 57 MB download that thirdparty/ does not
+# track, so a fresh clone builds without it and simply has the feature greyed
+# out. Nothing else in the engine depends on it.
+set(OIDN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/oidn)
+if(EXISTS "${OIDN_DIR}/include/OpenImageDenoise/oidn.hpp")
+    set(LITHIUM_HAS_OIDN TRUE)
+    set(OIDN_INCLUDE_DIR "${OIDN_DIR}/include")
+    if(WIN32)
+        set(OIDN_LIBRARIES "${OIDN_DIR}/lib/OpenImageDenoise.lib")
+        set(OIDN_LINK_DIR "")
+    else()
+        set(OIDN_LIBRARIES OpenImageDenoise)
+        set(OIDN_LINK_DIR "${OIDN_DIR}/lib")
+    endif()
+    message(STATUS "Open Image Denoise found - TESLA denoising enabled")
+else()
+    set(LITHIUM_HAS_OIDN FALSE)
+    set(OIDN_INCLUDE_DIR "")
+    set(OIDN_LIBRARIES "")
+    set(OIDN_LINK_DIR "")
+    message(STATUS "Open Image Denoise not found - TESLA denoising disabled")
+endif()
+
 # Setup ImGui directories
 set(IMGUI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/imgui)
 
@@ -241,8 +272,8 @@ FetchContent_MakeAvailable(enet)
 
 # Executable - Engine
 add_executable(Lithium_Engine ${SOURCES})
-target_include_directories(Lithium_Engine PRIVATE include src ${EMBREE_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/miniaudio ${enet_SOURCE_DIR}/include)
-target_link_directories(Lithium_Engine PRIVATE include/imgui ${EMBREE_LINK_DIR})
+target_include_directories(Lithium_Engine PRIVATE include src ${EMBREE_INCLUDE_DIR} ${OIDN_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/miniaudio ${enet_SOURCE_DIR}/include)
+target_link_directories(Lithium_Engine PRIVATE include/imgui ${EMBREE_LINK_DIR} ${OIDN_LINK_DIR})
 target_link_libraries(Lithium_Engine
     ${SDL2_LIBRARIES}
     ${OPENGL_LIBRARIES}
@@ -253,6 +284,12 @@ target_link_libraries(Lithium_Engine
     ${EMBREE_LIBRARIES}
     ${PLATFORM_LIBS}
 )
+
+if(LITHIUM_HAS_OIDN)
+    target_link_libraries(Lithium_Engine ${OIDN_LIBRARIES})
+    target_compile_definitions(Lithium_Engine PRIVATE LITHIUM_HAS_OIDN=1)
+endif()
+
 if(WIN32)
     # Windows resolves DLLs from the executable's own directory, so there is no
     # RPATH equivalent to set - the DLLs are copied beside the .exe instead.
@@ -276,8 +313,8 @@ endif()
 # Executable - Game
 add_executable(Lithium_Game ${SOURCES})
 target_compile_definitions(Lithium_Game PRIVATE STANDALONE_GAME)
-target_include_directories(Lithium_Game PRIVATE include src ${EMBREE_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/miniaudio ${enet_SOURCE_DIR}/include)
-target_link_directories(Lithium_Game PRIVATE include/imgui ${EMBREE_LINK_DIR})
+target_include_directories(Lithium_Game PRIVATE include src ${EMBREE_INCLUDE_DIR} ${OIDN_INCLUDE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/miniaudio ${enet_SOURCE_DIR}/include)
+target_link_directories(Lithium_Game PRIVATE include/imgui ${EMBREE_LINK_DIR} ${OIDN_LINK_DIR})
 target_link_libraries(Lithium_Game
     ${SDL2_LIBRARIES}
     ${OPENGL_LIBRARIES}
@@ -288,6 +325,12 @@ target_link_libraries(Lithium_Game
     ${EMBREE_LIBRARIES}
     ${PLATFORM_LIBS}
 )
+
+if(LITHIUM_HAS_OIDN)
+    target_link_libraries(Lithium_Game ${OIDN_LIBRARIES})
+    target_compile_definitions(Lithium_Game PRIVATE LITHIUM_HAS_OIDN=1)
+endif()
+
 if(WIN32)
     # Windows resolves DLLs from the executable's own directory, so there is no
     # RPATH equivalent to set - the DLLs are copied beside the .exe instead.
@@ -325,6 +368,29 @@ else()
         "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/embree/libtbb.so.12"
         "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/embree/libur_loader.so.0")
     set(LITHIUM_RUNTIME_LIB_SUBDIR "/lib")
+endif()
+
+# Open Image Denoise ships its runtime as a set of .so files, and the executables
+# already carry an RPATH of $ORIGIN/lib - so staging them alongside embree's is
+# what makes both a local build and an exported game find them. Appended to the
+# same list rather than given their own rpath entry, because an rpath pointing
+# into thirdparty/ would only ever resolve on the machine that built it.
+#
+# The device backends are deliberately not all copied: the CUDA, HIP and SYCL
+# ones are ~100 MB of GPU runtimes for hardware this engine's CPU device does
+# not use, and OIDN loads only the backend it selects.
+if(LITHIUM_HAS_OIDN)
+    if(WIN32)
+        list(APPEND LITHIUM_RUNTIME_LIBS
+            "${OIDN_DIR}/bin/OpenImageDenoise.dll"
+            "${OIDN_DIR}/bin/OpenImageDenoise_core.dll"
+            "${OIDN_DIR}/bin/OpenImageDenoise_device_cpu.dll")
+    else()
+        list(APPEND LITHIUM_RUNTIME_LIBS
+            "${OIDN_DIR}/lib/libOpenImageDenoise.so.2"
+            "${OIDN_DIR}/lib/libOpenImageDenoise_core.so.2.3.0"
+            "${OIDN_DIR}/lib/libOpenImageDenoise_device_cpu.so.2.3.0")
+    endif()
 endif()
 
 # Ship engine-bundled default assets (the default HDRI environment map, and

@@ -1040,6 +1040,42 @@ void Editor::draw_menu_bar(std::vector<std::shared_ptr<Actor>>& actors, bool& ou
                                       "render has finished resumes it rather than restarting.");
                 }
 
+                ImGui::Separator();
+
+                // Denoising. Presented as a display option rather than a render
+                // setting, because it is exactly that: the accumulation underneath
+                // is untouched and unbiased, and turning this off shows it raw.
+                if (active_renderer->tesla.denoise_available()) {
+                    ImGui::Checkbox("Denoise (Open Image Denoise)", &ts.denoise);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Runs Intel Open Image Denoise over the finished\n"
+                                          "image, using first-hit albedo and normals to keep\n"
+                                          "edges the noisy estimate cannot resolve.\n\n"
+                                          "The accumulation is not modified - this is a view\n"
+                                          "of it, and unticking shows the raw result.");
+                    }
+                    if (!ts.denoise) ImGui::BeginDisabled();
+                    ImGui::Checkbox("Denoise while rendering", &ts.denoise_while_rendering);
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Filters every preview update instead of only the\n"
+                                          "finished render. Costs more time than the samples\n"
+                                          "it saves, and is worth it while dialling in lighting.");
+                    }
+                    if (!ts.denoise) ImGui::EndDisabled();
+
+                    if (active_renderer->tesla.denoised_is_current()) {
+                        ImGui::TextDisabled("Showing denoised image");
+                    }
+                } else {
+                    ImGui::TextDisabled("Denoiser unavailable in this build");
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("Built without Open Image Denoise. Place the SDK in\n"
+                                          "thirdparty/oidn and re-run CMake to enable it.");
+                    }
+                }
+
+                ImGui::Separator();
+
                 ImGui::Checkbox("Auto exposure", &active_renderer->tesla_auto_exposure);
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("The rasteriser's auto-exposure is driven by a buffer the\n"
